@@ -26,14 +26,14 @@ public class Game {
 
     public void run() throws IOException {
 
-        BG = ImageIO.read(new File("C:/Users/PMLS/Documents/NetBeansProjects/semproject/src/images/b.png"));
+            String basePath = System.getProperty("user.dir") + "/src/images/";
 
-        SELECTOR = ImageIO.read(new File("C:/Users/PMLS/Documents/NetBeansProjects/semproject/src/images/s.png"));
+     BG = ImageIO.read(new File(basePath + "b.png"));
+     SELECTOR = ImageIO.read(new File(basePath + "s.png"));
 
-        for (int i = 0; i < 6; i++) {
-            candyImages[i] = ImageIO.read(new File("C:/Users/PMLS/Documents/NetBeansProjects/semproject/src/images/" + (i + 1) + ".png"));
-        }
-
+     for (int i = 0; i < 6; i++) {
+         candyImages[i] = ImageIO.read(new File(basePath + (i + 1) + ".png"));
+     }
         initBoard();
 
         panel = new JPanel() {
