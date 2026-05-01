@@ -163,8 +163,16 @@ public class Board {
     public void removeMatches(ArrayList<Point> matches) {
         for (Point p : matches) {
             if (grid[p.y][p.x] != null) {
-                grid[p.y][p.x].onMatch();
-                grid[p.y][p.x] = null;
+               Candy c = grid[p.y][p.x];
+
+if (c instanceof StripedCandy) {
+    clearRowOrColumn(p, (StripedCandy) c);
+}
+else if (c instanceof BombCandy) {
+    clearColor(((BombCandy) c));
+}
+
+grid[p.y][p.x] = null;
             }
         }
     }
@@ -202,4 +210,25 @@ public class Board {
         }
         resolveAllMatches(images); // guaranteed clean after every refill
     }
+    private void clearRowOrColumn(Point p, StripedCandy sc) {
+    if (sc.isHorizontal()) {
+        for (int x = 0; x < size; x++)
+            grid[p.y][x] = null;
+    } else {
+        for (int y = 0; y < size; y++)
+            grid[y][p.x] = null;
+    }
+}
+    private void clearColor(BombCandy bomb) {
+    int targetType = random.nextInt(6); // improve later
+
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            if (grid[y][x] != null &&
+                grid[y][x].getType() == targetType) {
+                grid[y][x] = null;
+            }
+        }
+    }
+}
 }
