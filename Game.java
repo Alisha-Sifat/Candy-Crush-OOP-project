@@ -57,14 +57,9 @@ public class Game {
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
     }
 
-    private void initBoard() {
-        for (int y = 0; y < SIZE; y++) {
-            for (int x = 0; x < SIZE; x++) {
-                int type = (int) (Math.random() * 6);
-                board.set(x, y, new NormalCandy(type, candyImages[type]));
-            }
-        }
-    }
+   private void initBoard() {
+    board.initBoard(candyImages);
+}
 
     private void render(Graphics g) {
         g.drawImage(BG, 0, 0, PIXEL_SIZE, PIXEL_SIZE, null);
@@ -100,16 +95,14 @@ public class Game {
                 if (matches.isEmpty()) {
                     board.swap(selected, second);
                 } else {
-                   while (!matches.isEmpty()) {
-    board.removeMatches(matches);
-    board.applyGravity();
-    board.refill(candyImages);   // 🔥 ADD THIS
-
-    matches = board.findMatches();
-
-    score += matches.size();
-    frame.setTitle("Score: " + score);
-}
+                    while (!matches.isEmpty()) {
+                        score += matches.size();              // ✅ count current matches first
+                        frame.setTitle("Score: " + score);
+                        board.removeMatches(matches);
+                        board.applyGravity();
+                        board.refill(candyImages);
+                        matches = board.findMatches();        // then find next cascade
+                    }
                 }
             }
             selected = null;
