@@ -1,7 +1,7 @@
 
 import java.io.File;
 import com.candycrush.Candy;
-import com.candycrush.Board;
+
 import java.awt.*;
 import java.awt.event.*;
 import java.io.IOException;
@@ -100,13 +100,16 @@ public class Game {
                 if (matches.isEmpty()) {
                     board.swap(selected, second);
                 } else {
-                    while (!matches.isEmpty()) {
-                        board.removeMatches(matches);
-                        board.applyGravity();
-                        matches = board.findMatches();
-                        score += matches.size();
-                        frame.setTitle("Score: " + score);
-                    }
+                   while (!matches.isEmpty()) {
+    board.removeMatches(matches);
+    board.applyGravity();
+    board.refill(candyImages);   // 🔥 ADD THIS
+
+    matches = board.findMatches();
+
+    score += matches.size();
+    frame.setTitle("Score: " + score);
+}
                 }
             }
             selected = null;
