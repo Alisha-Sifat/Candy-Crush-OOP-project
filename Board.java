@@ -8,22 +8,32 @@ public class Board {
     private int size;
     private Random random = new Random();
 
+    // ── Match group ──────────────────────────────────────────────────────
+    /**
+     * One contiguous run of same-colored candies in a straight line.
+     * horizontal=true  → the run goes left-to-right
+     * horizontal=false → the run goes top-to-bottom
+     */
+    public static class MatchGroup {
+        public final ArrayList<Point> points;
+        public final boolean horizontal;
+
+        public MatchGroup(ArrayList<Point> points, boolean horizontal) {
+            this.points = points;
+            this.horizontal = horizontal;
+        }
+
+        public int size() { return points.size(); }
+    }
+
     public Board(int size) {
         this.size = size;
         grid = new Candy[size][size];
     }
 
-    public Candy get(int x, int y) {
-        return grid[y][x];
-    }
-
-    public void set(int x, int y, Candy candy) {
-        grid[y][x] = candy;
-    }
-
-    public int getSize() {
-        return size;
-    }
+    public Candy get(int x, int y) { return grid[y][x]; }
+    public void set(int x, int y, Candy c) { grid[y][x] = c; }
+    public int getSize() { return size; }
 
     public void swap(Point a, Point b) {
         Candy temp = grid[a.y][a.x];
@@ -31,159 +41,200 @@ public class Board {
         grid[b.y][b.x] = temp;
     }
 
-    // Checks ALL 4 directions properly
-    private boolean wouldCreateMatch(int x, int y, int type) {
-        // Horizontal
-        int left = 0;
-        while (x - left - 1 >= 0
-                && grid[y][x - left - 1] != null
-                && grid[y][x - left - 1].getType() == type) {
-            left++;
-        }
-        int right = 0;
-        while (x + right + 1 < size
-                && grid[y][x + right + 1] != null
-                && grid[y][x + right + 1].getType() == type) {
-            right++;
-        }
-        if (left + right >= 2) return true;
+    // ── Match detection ──────────────────────────────────────────────────
 
-        // Vertical
-        int up = 0;
-        while (y - up - 1 >= 0
-                && grid[y - up - 1][x] != null
-                && grid[y - up - 1][x].getType() == type) {
-            up++;
-        }
-        int down = 0;
-        while (y + down + 1 < size
-                && grid[y + down + 1][x] != null
-                && grid[y + down + 1][x].getType() == type) {
-            down++;
-        }
-        if (up + down >= 2) return true;
-
-        return false;
-    }
-
-    // Nuclear option — after everything is placed, scan and fix ANY remaining match
-    public void resolveAllMatches(java.awt.Image[] images) {
-        int totalTypes = images.length;
-        ArrayList<Point> matches = findMatches();
-
-        int safetyCounter = 0;
-        while (!matches.isEmpty() && safetyCounter < 100) {
-            for (Point p : matches) {
-                ArrayList<Integer> safeTypes = new ArrayList<>();
-                for (int t = 0; t < totalTypes; t++) {
-                    Candy original = grid[p.y][p.x];
-                    grid[p.y][p.x] = null;           // temporarily remove
-                    if (!wouldCreateMatch(p.x, p.y, t)) {
-                        safeTypes.add(t);
-                    }
-                    grid[p.y][p.x] = original;        // restore
-                }
-                int type = safeTypes.isEmpty()
-                        ? random.nextInt(totalTypes)
-                        : safeTypes.get(random.nextInt(safeTypes.size()));
-                grid[p.y][p.x] = new NormalCandy(type, images[type]);
-            }
-            matches = findMatches();
-            safetyCounter++;
-        }
-    }
-
-    public void initBoard(java.awt.Image[] images) {
-        int totalTypes = images.length;
-        for (int y = 0; y < size; y++) {
-            for (int x = 0; x < size; x++) {
-                ArrayList<Integer> safeTypes = new ArrayList<>();
-                for (int t = 0; t < totalTypes; t++) {
-                    if (!wouldCreateMatch(x, y, t)) {
-                        safeTypes.add(t);
-                    }
-                }
-                int type = safeTypes.isEmpty()
-                        ? random.nextInt(totalTypes)
-                        : safeTypes.get(random.nextInt(safeTypes.size()));
-                grid[y][x] = new NormalCandy(type, images[type]);
-            }
-        }
-        resolveAllMatches(images); // clean sweep at the end
-    }
-
-    public ArrayList<Point> findMatches() {
-        ArrayList<Point> result = new ArrayList<>();
+    /**
+     * Returns every run of 3+ same-typed candies as a MatchGroup.
+     * Each group carries its direction (horizontal / vertical).
+     * StripedCandy and BombCandy participate via their getType() value.
+     */
+    public ArrayList<MatchGroup> findMatchGroups() {
+        ArrayList<MatchGroup> groups = new ArrayList<>();
 
         // Horizontal
         for (int y = 0; y < size; y++) {
-            int count = 1;
-            for (int x = 1; x < size; x++) {
-                if (grid[y][x] != null && grid[y][x - 1] != null &&
-                        grid[y][x].getType() == grid[y][x - 1].getType()) {
-                    count++;
-                } else {
-                    if (count >= 3) {
-                        for (int i = 0; i < count; i++)
-                            result.add(new Point(x - 1 - i, y));
-                    }
-                    count = 1;
+            int x = 0;
+            while (x < size) {
+                if (grid[y][x] == null) { x++; continue; }
+                int type = grid[y][x].getType();
+                int start = x;
+                while (x < size && grid[y][x] != null && grid[y][x].getType() == type) x++;
+                if (x - start >= 3) {
+                    ArrayList<Point> pts = new ArrayList<>();
+                    for (int i = start; i < x; i++) pts.add(new Point(i, y));
+                    groups.add(new MatchGroup(pts, true));
                 }
-            }
-            if (count >= 3) {
-                for (int i = 0; i < count; i++)
-                    result.add(new Point(size - 1 - i, y));
             }
         }
 
         // Vertical
         for (int x = 0; x < size; x++) {
-            int count = 1;
-            for (int y = 1; y < size; y++) {
-                if (grid[y][x] != null && grid[y - 1][x] != null &&
-                        grid[y][x].getType() == grid[y - 1][x].getType()) {
-                    count++;
-                } else {
-                    if (count >= 3) {
-                        for (int i = 0; i < count; i++)
-                            result.add(new Point(x, y - 1 - i));
-                    }
-                    count = 1;
+            int y = 0;
+            while (y < size) {
+                if (grid[y][x] == null) { y++; continue; }
+                int type = grid[y][x].getType();
+                int start = y;
+                while (y < size && grid[y][x] != null && grid[y][x].getType() == type) y++;
+                if (y - start >= 3) {
+                    ArrayList<Point> pts = new ArrayList<>();
+                    for (int i = start; i < y; i++) pts.add(new Point(x, i));
+                    groups.add(new MatchGroup(pts, false));
                 }
-            }
-            if (count >= 3) {
-                for (int i = 0; i < count; i++)
-                    result.add(new Point(x, size - 1 - i));
             }
         }
 
+        return groups;
+    }
+
+    /** Flat list version — used where group info isn't needed. */
+    public ArrayList<Point> findMatches() {
+        ArrayList<Point> result = new ArrayList<>();
+        for (MatchGroup g : findMatchGroups()) result.addAll(g.points);
         return result;
     }
 
-    public void removeMatches(ArrayList<Point> matches) {
+    // ── Special candy creation ───────────────────────────────────────────
+
+    /**
+     * After a swap, inspects match groups and places special candies.
+     *
+     * Bomb rule:     a SINGLE group of 5+ in a straight line → BombCandy
+     * Striped rule:  a SINGLE group of exactly 4 in a line  → StripedCandy
+     *   horizontal match → candy strips its COLUMN  (isHorizontal = false)
+     *   vertical match   → candy strips its ROW     (isHorizontal = true)
+     *
+     * The anchor cell (where the special is placed) is whichever of the two
+     * swapped cells belongs to the group. If neither does, we use index 0.
+     *
+     * @return points where a special was placed (exclude from normal removal)
+     */
+    public ArrayList<Point> createSpecials(
+            ArrayList<MatchGroup> groups,
+            Point swapA, Point swapB,
+            java.awt.Image[] candyImages,
+            java.awt.Image bombImg) {
+
+        ArrayList<Point> specialPoints = new ArrayList<>();
+
+        for (MatchGroup g : groups) {
+            if (g.size() < 4) continue;
+
+            // Find the anchor: prefer whichever swapped cell is in this group
+            Point anchor = null;
+            for (Point p : g.points) {
+                if ((p.x == swapA.x && p.y == swapA.y) ||
+                    (p.x == swapB.x && p.y == swapB.y)) {
+                    anchor = p;
+                    break;
+                }
+            }
+            if (anchor == null) anchor = g.points.get(0);
+
+            int type = grid[anchor.y][anchor.x] != null
+                       ? grid[anchor.y][anchor.x].getType()
+                       : 0;
+
+            if (g.size() >= 5) {
+                // 5 in a straight line → bomb
+                grid[anchor.y][anchor.x] = new BombCandy(bombImg);
+
+            } else {
+                // Exactly 4 → striped, perpendicular to the match direction
+                // g.horizontal=true  (row match)    → clears COLUMN → isHorizontal=false
+                // g.horizontal=false (column match)  → clears ROW   → isHorizontal=true
+                boolean stripeHoriz = !g.horizontal;
+                grid[anchor.y][anchor.x] = new StripedCandy(
+                        type, candyImages[type], stripeHoriz);
+            }
+
+            specialPoints.add(new Point(anchor.x, anchor.y));
+        }
+
+        return specialPoints;
+    }
+
+    // ── Match removal ────────────────────────────────────────────────────
+
+    /**
+     * Nulls out every point in the list. If a point holds a StripedCandy,
+     * fires its row/column clear first.
+     *
+     * @return extra positions cleared by striped effects (for scoring)
+     */
+    public ArrayList<Point> removeMatches(ArrayList<Point> matches) {
+        ArrayList<Point> extras = new ArrayList<>();
         for (Point p : matches) {
-            if (grid[p.y][p.x] != null) {
-               Candy c = grid[p.y][p.x];
+            if (grid[p.y][p.x] == null) continue;
+            Candy c = grid[p.y][p.x];
+            if (c instanceof StripedCandy) {
+                extras.addAll(clearRowOrColumn(p, (StripedCandy) c));
+            }
+            grid[p.y][p.x] = null;
+        }
+        return extras;
+    }
 
-if (c instanceof StripedCandy) {
-    clearRowOrColumn(p, (StripedCandy) c);
-}
-else if (c instanceof BombCandy) {
-    clearColor(((BombCandy) c));
-}
+    // ── Row / column clear ───────────────────────────────────────────────
 
-grid[p.y][p.x] = null;
+    /**
+     * Clears the row (isHorizontal=true) or column (isHorizontal=false)
+     * of the given striped candy. Returns cleared positions for animation.
+     */
+    public ArrayList<Point> clearRowOrColumn(Point p, StripedCandy sc) {
+        ArrayList<Point> cleared = new ArrayList<>();
+        if (sc.isHorizontal()) {
+            for (int x = 0; x < size; x++) {
+                if (x != p.x && grid[p.y][x] != null) {
+                    cleared.add(new Point(x, p.y));
+                    grid[p.y][x] = null;
+                }
+            }
+        } else {
+            for (int y = 0; y < size; y++) {
+                if (y != p.y && grid[y][p.x] != null) {
+                    cleared.add(new Point(p.x, y));
+                    grid[y][p.x] = null;
+                }
             }
         }
+        return cleared;
     }
+
+    // ── Bomb color clear ─────────────────────────────────────────────────
+
+    /**
+     * Destroys all normal candies of targetType.
+     * Returns their positions so Game.java can render lightning.
+     */
+    public ArrayList<Point> clearColor(int targetType) {
+        ArrayList<Point> destroyed = new ArrayList<>();
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                if (grid[y][x] != null &&
+                    grid[y][x].getType() == targetType &&
+                    !(grid[y][x] instanceof BombCandy) &&
+                    !(grid[y][x] instanceof StripedCandy)) {
+                    grid[y][x] = null;
+                    destroyed.add(new Point(x, y));
+                }
+            }
+        }
+        return destroyed;
+    }
+
+    // ── Gravity & refill ─────────────────────────────────────────────────
 
     public void applyGravity() {
         for (int x = 0; x < size; x++) {
-            for (int y = size - 1; y > 0; y--) {
-                if (grid[y][x] == null && grid[y - 1][x] != null) {
-                    grid[y][x] = grid[y - 1][x];
-                    grid[y - 1][x] = null;
-                    y = size;
+            boolean moved = true;
+            while (moved) {
+                moved = false;
+                for (int y = size - 1; y > 0; y--) {
+                    if (grid[y][x] == null && grid[y-1][x] != null) {
+                        grid[y][x] = grid[y-1][x];
+                        grid[y-1][x] = null;
+                        moved = true;
+                    }
                 }
             }
         }
@@ -191,44 +242,82 @@ grid[p.y][p.x] = null;
 
     public void refill(java.awt.Image[] images) {
         int totalTypes = images.length;
-        // Bottom to top so wouldCreateMatch has full context
         for (int x = 0; x < size; x++) {
             for (int y = size - 1; y >= 0; y--) {
                 if (grid[y][x] == null) {
-                    ArrayList<Integer> safeTypes = new ArrayList<>();
+                    ArrayList<Integer> safe = new ArrayList<>();
                     for (int t = 0; t < totalTypes; t++) {
-                        if (!wouldCreateMatch(x, y, t)) {
-                            safeTypes.add(t);
-                        }
+                        if (!wouldCreateMatch(x, y, t)) safe.add(t);
                     }
-                    int type = safeTypes.isEmpty()
+                    int type = safe.isEmpty()
                             ? random.nextInt(totalTypes)
-                            : safeTypes.get(random.nextInt(safeTypes.size()));
+                            : safe.get(random.nextInt(safe.size()));
                     grid[y][x] = new NormalCandy(type, images[type]);
                 }
             }
         }
-        resolveAllMatches(images); // guaranteed clean after every refill
+        resolveAllMatches(images);
     }
-    private void clearRowOrColumn(Point p, StripedCandy sc) {
-    if (sc.isHorizontal()) {
-        for (int x = 0; x < size; x++)
-            grid[p.y][x] = null;
-    } else {
-        for (int y = 0; y < size; y++)
-            grid[y][p.x] = null;
-    }
-}
-    private void clearColor(BombCandy bomb) {
-    int targetType = random.nextInt(6); // improve later
 
-    for (int y = 0; y < size; y++) {
-        for (int x = 0; x < size; x++) {
-            if (grid[y][x] != null &&
-                grid[y][x].getType() == targetType) {
-                grid[y][x] = null;
+    // ── Board init ───────────────────────────────────────────────────────
+
+    public void initBoard(java.awt.Image[] images) {
+        int totalTypes = images.length;
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                ArrayList<Integer> safe = new ArrayList<>();
+                for (int t = 0; t < totalTypes; t++) {
+                    if (!wouldCreateMatch(x, y, t)) safe.add(t);
+                }
+                int type = safe.isEmpty()
+                        ? random.nextInt(totalTypes)
+                        : safe.get(random.nextInt(safe.size()));
+                grid[y][x] = new NormalCandy(type, images[type]);
             }
         }
+        resolveAllMatches(images);
     }
-}
+
+    public void resolveAllMatches(java.awt.Image[] images) {
+        int totalTypes = images.length;
+        ArrayList<Point> matches = findMatches();
+        int safety = 0;
+        while (!matches.isEmpty() && safety < 100) {
+            for (Point p : matches) {
+                ArrayList<Integer> safe = new ArrayList<>();
+                for (int t = 0; t < totalTypes; t++) {
+                    Candy orig = grid[p.y][p.x];
+                    grid[p.y][p.x] = null;
+                    if (!wouldCreateMatch(p.x, p.y, t)) safe.add(t);
+                    grid[p.y][p.x] = orig;
+                }
+                int type = safe.isEmpty()
+                        ? random.nextInt(totalTypes)
+                        : safe.get(random.nextInt(safe.size()));
+                grid[p.y][p.x] = new NormalCandy(type, images[type]);
+            }
+            matches = findMatches();
+            safety++;
+        }
+    }
+
+    // ── Internal helpers ─────────────────────────────────────────────────
+
+    private boolean wouldCreateMatch(int x, int y, int type) {
+        int left = 0;
+        while (x-left-1 >= 0 && grid[y][x-left-1] != null
+               && grid[y][x-left-1].getType() == type) left++;
+        int right = 0;
+        while (x+right+1 < size && grid[y][x+right+1] != null
+               && grid[y][x+right+1].getType() == type) right++;
+        if (left + right >= 2) return true;
+
+        int up = 0;
+        while (y-up-1 >= 0 && grid[y-up-1][x] != null
+               && grid[y-up-1][x].getType() == type) up++;
+        int down = 0;
+        while (y+down+1 < size && grid[y+down+1][x] != null
+               && grid[y+down+1][x].getType() == type) down++;
+        return up + down >= 2;
+    }
 }
