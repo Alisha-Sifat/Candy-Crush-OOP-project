@@ -10,12 +10,16 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
 
-public class Game {
 
+public class Game{
+    JFrame frame;
+    TopPanel topPanel;
     final int SIZE        = 8;
     final int PIXEL_SIZE  = 600;
     final int SQUARE_SIZE = PIXEL_SIZE / SIZE;
-
+    Level currentLevel;
+    int movesLeft;
+    int targetScore;
     Board board = new Board(SIZE);
 
     Image[] candyImages = new Image[6];
@@ -24,7 +28,7 @@ public class Game {
     Point selected = null;
     int score = 0;
 
-    JFrame frame = new JFrame("Score: 0");
+  
     JPanel panel;
 
     // ── Fall animation ───────────────────────────────────────────────────
@@ -64,6 +68,7 @@ public class Game {
     //  STARTUP
     // ────────────────────────────────────────────────────────────────────
     public void run() throws IOException {
+        frame = new JFrame("Sugar Rush Saga");
         String basePath = System.getProperty("user.dir") + "/src/images/";
 
         BG       = ImageIO.read(new File(basePath + "b.png"));
@@ -102,7 +107,12 @@ public class Game {
         });
         animTimer.start();
 
-        frame.add(panel);
+       frame.setLayout(new BorderLayout());
+
+topPanel = new TopPanel();
+
+frame.add(topPanel, BorderLayout.NORTH);  // 🔥 TOP BAR
+frame.add(panel, BorderLayout.CENTER);    // 🎮 GAME BOARD
         frame.pack();
         frame.setVisible(true);
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -265,6 +275,9 @@ public class Game {
 
         score += toRemove.size();
         frame.setTitle("Score: " + score);
+        movesLeft--;
+        updateUI();
+        checkGameEnd();  
 
         // Snapshot striped candy directions BEFORE removeMatches nulls them
         ArrayList<float[]> stripedSnapshots = snapshotStripedEffects(toRemove);
@@ -651,4 +664,32 @@ public class Game {
         g2.setColor(new Color(255, 255, 255, Math.min(255, a + 40)));
         g2.fillRect(colX, ey, thick, 6);
     }
+   
+   private void updateUI() {
+    topPanel.update(score, movesLeft, targetScore);
+}
+    private void checkGameEnd() {
+
+    if (score >= targetScore) {
+        JOptionPane.showMessageDialog(frame, "Level Complete!");
+        frame.dispose();
+        new LevelSelect().showLevels();
+    }
+    else if (movesLeft <= 0) {
+        JOptionPane.showMessageDialog(frame, "Game Over!");
+        frame.dispose();
+        new LevelSelect().showLevels();
+    }
+}
+    public void startLevel(Level level) {
+    try {
+        this.movesLeft = level.getMaxMoves();
+        this.targetScore = level.getTargetScore();
+        this.score = 0;
+
+        run(); // start the game
+    } catch (Exception e) {
+        e.printStackTrace();
+    }
+}
 }
