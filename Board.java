@@ -203,6 +203,86 @@ public class Board {
     // ── Bomb color clear ─────────────────────────────────────────────────
 
     /**
+     * Bomb + Striped combo: converts every normal candy of targetType into a
+     * StripedCandy (random direction), fires each one's row/column clear,
+     * and returns swipe data for Game.java to animate.
+     *
+     * Format of each float[]: { gridCol, gridRow, horizClear(1/0) }
+     * The board cells are nulled by clearRowOrColumn — the converted candy
+     * cell itself is also nulled after firing.
+     *
+     * @param targetType  color index of the striped candy that was swapped
+     * @param images      candy images array (to build the StripedCandy)
+     * @return list of swipe descriptors for every candy that was converted
+     */
+    public ArrayList<float[]> convertColorToStriped(int targetType, java.awt.Image[] images) {
+        ArrayList<float[]> swipes = new ArrayList<>();
+
+        // First pass: find all matching normal candies and convert them
+        ArrayList<Point> toFire = new ArrayList<>();
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                if (grid[y][x] != null &&
+                    grid[y][x].getType() == targetType &&
+                    !(grid[y][x] instanceof BombCandy) &&
+                    !(grid[y][x] instanceof StripedCandy)) {
+                    // Random direction for each converted candy
+                    boolean horiz = random.nextBoolean();
+                    grid[y][x] = new StripedCandy(targetType, images[targetType], horiz);
+                    toFire.add(new Point(x, y));
+                }
+            }
+        }
+
+        // Second pass: fire each converted candy's row/column clear
+        // (do this after ALL conversions so clears don't wipe unconverted ones)
+        for (Point p : toFire) {
+            if (grid[p.y][p.x] == null) continue; // already cleared by another beam
+            StripedCandy sc = (StripedCandy) grid[p.y][p.x];
+            boolean horiz = sc.isHorizontal();
+            swipes.add(new float[]{ p.x, p.y, horiz ? 1f : 0f });
+            clearRowOrColumn(p, sc);
+            grid[p.y][p.x] = null; // remove the converted candy itself
+        }
+
+        return swipes;
+    }
+
+    /**
+     * Returns positions of all normal candies (not Bomb/Striped) of targetType.
+     * Used by Game.java to know where to shoot lightning bolts before conversion.
+     */
+    public ArrayList<Point> findCandiesOfColor(int targetType) {
+        ArrayList<Point> found = new ArrayList<>();
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                if (grid[y][x] != null &&
+                    grid[y][x].getType() == targetType &&
+                    !(grid[y][x] instanceof BombCandy) &&
+                    !(grid[y][x] instanceof StripedCandy)) {
+                    found.add(new Point(x, y));
+                }
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Converts the candies at the given positions into StripedCandies (random direction).
+     * Called after lightning finishes in a bomb+stripe combo, so the player sees
+     * the board update before the swipe beams fire.
+     * Skips cells that are already null (hit by something else first).
+     */
+    public void convertCandiesAtPoints(
+            ArrayList<Point> points, int color, java.awt.Image[] images) {
+        for (Point p : points) {
+            if (grid[p.y][p.x] == null) continue;
+            boolean horiz = random.nextBoolean();
+            grid[p.y][p.x] = new StripedCandy(color, images[color], horiz);
+        }
+    }
+
+    /**
      * Destroys all normal candies of targetType.
      * Returns their positions so Game.java can render lightning.
      */

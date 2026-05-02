@@ -1,7 +1,6 @@
 import com.candycrush.Candy;
 import java.awt.*;
 import java.awt.event.*;
-import java.awt.geom.Rectangle2D;
 import java.io.File;
 import java.io.IOException;
 import javax.imageio.ImageIO;
@@ -13,15 +12,14 @@ import java.util.Random;
 
 public class Game {
 
-    final int SIZE       = 8;
-    final int PIXEL_SIZE = 600;
+    final int SIZE        = 8;
+    final int PIXEL_SIZE  = 600;
     final int SQUARE_SIZE = PIXEL_SIZE / SIZE;
 
     Board board = new Board(SIZE);
 
     Image[] candyImages = new Image[6];
     Image BG, SELECTOR, bombImg;
-    // No separate stripedImg needed — stripe is drawn procedurally over candy color
 
     Point selected = null;
     int score = 0;
@@ -29,44 +27,42 @@ public class Game {
     JFrame frame = new JFrame("Score: 0");
     JPanel panel;
 
-    // ── Candy colors for stripe tint (matches your 6 candy types) ───────
-    // Adjust these to match your actual candy image colors
-    private static final Color[] CANDY_COLORS = {
-        new Color(220,  60,  60),   // 0 red
-        new Color( 60, 160, 220),   // 1 blue
-        new Color( 60, 200,  80),   // 2 green
-        new Color(240, 200,  40),   // 3 yellow
-        new Color(180,  80, 220),   // 4 purple
-        new Color(240, 130,  40),   // 5 orange
-    };
-
     // ── Fall animation ───────────────────────────────────────────────────
     private final Map<String, Float> candyOffsets = new HashMap<>();
-    private boolean isAnimating = false;
     final float FALL_SPEED = 18f;
 
-    // ── Swipe animation (striped candy effect) ───────────────────────────
-    // Each entry: { x (grid), y (grid), isHorizontal (1/0), progress 0→1 }
-    private ArrayList<float[]> swipeEffects  = new ArrayList<>();
-    private boolean isSwipe = false;
+    // ── Swipe animation ──────────────────────────────────────────────────
+    // Each entry: { gridCol, gridRow, horizClear (1=row / 0=col), progress }
+    private ArrayList<float[]> swipeEffects = new ArrayList<>();
     private int swipeTicksRemaining = 0;
-    private static final int SWIPE_DURATION = 20; // ~0.33 s
+    private static final int SWIPE_DURATION = 20;
 
-    // ── Lightning animation (bomb effect) ────────────────────────────────
-    // Each entry: { originX, originY, targetX, targetY, progress }
+    // ── Lightning animation ──────────────────────────────────────────────
+    // Each entry: { originCol, originRow, targetCol, targetRow, progress }
     private ArrayList<float[]> lightningBolts = new ArrayList<>();
-    private boolean isLightning = false;
     private int lightningTicksRemaining = 0;
     private static final int LIGHTNING_DURATION = 30;
+
+    // ── Bomb+Stripe combo: pending conversion after lightning ────────────
+    private ArrayList<Point> pendingConversionPoints = new ArrayList<>();
+    private int pendingConversionColor = -1;     // -1 means no combo pending
+    private int conversionPauseTicks   = 0;
+    private static final int CONVERSION_PAUSE_DURATION = 18; // ~0.3 s
 
     private Random rng = new Random();
     private javax.swing.Timer animTimer;
 
-    // ── State machine ─────────────────────────────────────────────────────
-    // Ensures swipe plays before gravity, lightning plays before gravity, etc.
-    private enum Phase { IDLE, SWIPE, LIGHTNING, FALLING }
+    // ── Phase state machine ──────────────────────────────────────────────
+    // Normal bomb:      IDLE -> LIGHTNING -> FALLING
+    // Bomb+Stripe:      IDLE -> LIGHTNING -> CONVERSION_PAUSE -> SWIPE -> FALLING
+    // Striped match:    IDLE -> SWIPE -> FALLING
+    // Double-stripe:    IDLE -> SWIPE -> FALLING
+    private enum Phase { IDLE, LIGHTNING, CONVERSION_PAUSE, SWIPE, FALLING }
     private Phase phase = Phase.IDLE;
 
+    // ────────────────────────────────────────────────────────────────────
+    //  STARTUP
+    // ────────────────────────────────────────────────────────────────────
     public void run() throws IOException {
         String basePath = System.getProperty("user.dir") + "/src/images/";
 
@@ -96,9 +92,10 @@ public class Game {
 
         animTimer = new javax.swing.Timer(16, e -> {
             switch (phase) {
-                case SWIPE:     stepSwipe();     break;
-                case LIGHTNING: stepLightning(); break;
-                case FALLING:   stepFalling();   break;
+                case LIGHTNING:        stepLightning();       break;
+                case CONVERSION_PAUSE: stepConversionPause(); break;
+                case SWIPE:            stepSwipe();           break;
+                case FALLING:          stepFalling();         break;
                 default: break;
             }
             panel.repaint();
@@ -111,9 +108,9 @@ public class Game {
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
     }
 
-    // ───────────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────────────
     //  CLICK HANDLER
-    // ───────────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────────────
     private void handleClick(MouseEvent e) {
         int x = e.getX() / SQUARE_SIZE;
         int y = e.getY() / SQUARE_SIZE;
@@ -126,128 +123,228 @@ public class Game {
         Point second = new Point(x, y);
 
         if (!isNeighbor(selected, second)) {
-            selected = new Point(x, y); // re-select
+            selected = new Point(x, y);
             return;
         }
 
         Candy candyA = board.get(selected.x, selected.y);
         Candy candyB = board.get(second.x, second.y);
 
-        // ── Bomb swap: detect before swapping ────────────────────────────
-        boolean bombSwap = false;
-        Point  bombPos   = null;
-        int    colorToDestroy = -1;
+        // ── 1. Double-striped combo ──────────────────────────────────────
+        if (candyA instanceof StripedCandy && candyB instanceof StripedCandy) {
+            StripedCandy scA = (StripedCandy) candyA;
+            StripedCandy scB = (StripedCandy) candyB;
 
-        if (candyA instanceof BombCandy && !(candyB instanceof BombCandy)) {
-            bombSwap = true;
-            colorToDestroy = candyB.getType();
-        } else if (candyB instanceof BombCandy && !(candyA instanceof BombCandy)) {
-            bombSwap = true;
-            colorToDestroy = candyA.getType();
+            // Snapshot animations before any board changes
+            swipeEffects.clear();
+            swipeEffects.add(new float[]{ selected.x, selected.y,
+                                          scA.isHorizontal() ? 1f : 0f, 0f });
+            swipeEffects.add(new float[]{ second.x, second.y,
+                                          scB.isHorizontal() ? 1f : 0f, 0f });
+
+            // Fire both — board is cleared, neither triggers from the other
+            ArrayList<Point> cA = board.clearRowOrColumn(selected, scA);
+            ArrayList<Point> cB = board.clearRowOrColumn(second,   scB);
+            board.set(selected.x, selected.y, null);
+            board.set(second.x,   second.y,   null);
+
+            score += cA.size() + cB.size() + 2;
+            frame.setTitle("Score: " + score);
+
+            swipeTicksRemaining = SWIPE_DURATION;
+            phase = Phase.SWIPE;
+            selected = null;
+            return;
         }
 
-        board.swap(selected, second);
+        // ── 2. Bomb + Striped combo ──────────────────────────────────────
+        // Phase sequence: LIGHTNING (bolts hit each candy of that color)
+        //              -> CONVERSION_PAUSE (board shows them all as striped)
+        //              -> SWIPE (all fire simultaneously)
+        if ((candyA instanceof BombCandy && candyB instanceof StripedCandy) ||
+            (candyB instanceof BombCandy && candyA instanceof StripedCandy)) {
 
-        if (bombSwap) {
-            // Find where the bomb ended up after the swap
+            int color = (candyA instanceof StripedCandy)
+                        ? candyA.getType() : candyB.getType();
+            Point bombOrigin = (candyA instanceof BombCandy) ? selected : second;
+
+            // Remove the two special candies immediately
+            board.set(selected.x, selected.y, null);
+            board.set(second.x,   second.y,   null);
+
+            // Find all normal candies of that color — these get hit by lightning
+            ArrayList<Point> targets = board.findCandiesOfColor(color);
+
+            // Build lightning bolts (board untouched — player sees normal candies)
+            lightningBolts.clear();
+            for (Point t : targets) {
+                lightningBolts.add(new float[]{
+                    bombOrigin.x, bombOrigin.y, t.x, t.y, 0f
+                });
+            }
+
+            // Store info so after lightning we can convert + swipe
+            pendingConversionPoints.clear();
+            pendingConversionPoints.addAll(targets);
+            pendingConversionColor = color;
+
+            score += 2;
+            frame.setTitle("Score: " + score);
+
+            lightningTicksRemaining = LIGHTNING_DURATION;
+            if (lightningBolts.isEmpty()) {
+                // No targets — skip straight to conversion pause
+                board.convertCandiesAtPoints(
+                        pendingConversionPoints, pendingConversionColor, candyImages);
+                conversionPauseTicks = CONVERSION_PAUSE_DURATION;
+                phase = Phase.CONVERSION_PAUSE;
+            } else {
+                phase = Phase.LIGHTNING;
+            }
+            selected = null;
+            return;
+        }
+
+        // ── 3. Normal bomb swap ──────────────────────────────────────────
+        if ((candyA instanceof BombCandy && !(candyB instanceof BombCandy)) ||
+            (candyB instanceof BombCandy && !(candyA instanceof BombCandy))) {
+
+            int colorToDestroy = (candyA instanceof BombCandy)
+                                 ? candyB.getType() : candyA.getType();
+            board.swap(selected, second);
+
             Point bombAfter = (board.get(second.x, second.y) instanceof BombCandy)
                               ? second : selected;
-
             board.set(bombAfter.x, bombAfter.y, null);
-            ArrayList<Point> destroyed = board.clearColor(colorToDestroy);
 
+            ArrayList<Point> destroyed = board.clearColor(colorToDestroy);
             score += destroyed.size() + 1;
             frame.setTitle("Score: " + score);
 
-            // Build lightning bolts
             lightningBolts.clear();
             for (Point d : destroyed) {
-                lightningBolts.add(new float[]{ bombAfter.x, bombAfter.y, d.x, d.y, 0f });
+                lightningBolts.add(new float[]{
+                    bombAfter.x, bombAfter.y, d.x, d.y, 0f
+                });
             }
+            // Make sure no combo conversion is pending
+            pendingConversionColor = -1;
+
             lightningTicksRemaining = LIGHTNING_DURATION;
             phase = lightningBolts.isEmpty() ? Phase.IDLE : Phase.LIGHTNING;
             if (phase == Phase.IDLE) afterLightning();
+            selected = null;
+            return;
+        }
 
-        } else {
-            // ── Normal / striped swap ─────────────────────────────────────
-            ArrayList<Board.MatchGroup> groups = board.findMatchGroups();
+        // ── 4. Normal / striped match ────────────────────────────────────
+        board.swap(selected, second);
+        ArrayList<Board.MatchGroup> groups = board.findMatchGroups();
 
-            if (groups.isEmpty()) {
-                board.swap(selected, second); // revert — no match
-            } else {
-                // Create special candies for groups of 4 or 5+
-                ArrayList<Point> specials = board.createSpecials(
-                        groups, selected, second, candyImages, bombImg);
+        if (groups.isEmpty()) {
+            board.swap(selected, second); // revert
+            selected = null;
+            return;
+        }
 
-                // Collect all matched points; exclude special anchor cells
-                ArrayList<Point> toRemove = new ArrayList<>();
-                for (Board.MatchGroup g : groups) {
-                    for (Point p : g.points) {
-                        boolean isSpecial = false;
-                        for (Point sp : specials) {
-                            if (sp.x == p.x && sp.y == p.y) { isSpecial = true; break; }
-                        }
-                        if (!isSpecial) toRemove.add(p);
-                    }
+        // Create special candies for groups of 4 or 5+
+        ArrayList<Point> specials = board.createSpecials(
+                groups, selected, second, candyImages, bombImg);
+
+        // Collect points to remove, excluding special-candy anchors
+        ArrayList<Point> toRemove = new ArrayList<>();
+        for (Board.MatchGroup g : groups) {
+            for (Point p : g.points) {
+                boolean isSpecial = false;
+                for (Point sp : specials) {
+                    if (sp.x == p.x && sp.y == p.y) { isSpecial = true; break; }
                 }
-
-                score += toRemove.size();
-                frame.setTitle("Score: " + score);
-
-                // Snapshot striped candy directions BEFORE removeMatches nulls them
-                ArrayList<float[]> stripedSnapshots = snapshotStripedEffects(toRemove);
-
-                ArrayList<Point> extras = board.removeMatches(toRemove);
-                score += extras.size();
-                frame.setTitle("Score: " + score);
-
-                buildSwipeEffects(stripedSnapshots);
-
-                if (!swipeEffects.isEmpty()) {
-                    swipeTicksRemaining = SWIPE_DURATION;
-                    phase = Phase.SWIPE;
-                } else {
-                    afterSwipe();
-                }
+                if (!isSpecial) toRemove.add(p);
             }
+        }
+
+        score += toRemove.size();
+        frame.setTitle("Score: " + score);
+
+        // Snapshot striped candy directions BEFORE removeMatches nulls them
+        ArrayList<float[]> stripedSnapshots = snapshotStripedEffects(toRemove);
+        ArrayList<Point> extras = board.removeMatches(toRemove);
+        score += extras.size();
+        frame.setTitle("Score: " + score);
+
+        swipeEffects.clear();
+        swipeEffects.addAll(stripedSnapshots);
+
+        if (!swipeEffects.isEmpty()) {
+            swipeTicksRemaining = SWIPE_DURATION;
+            phase = Phase.SWIPE;
+        } else {
+            afterSwipe();
         }
 
         selected = null;
     }
 
-    // ── Snapshot striped candies BEFORE board.removeMatches() nulls them ──
-    // Returns ready-to-use swipe entries: { gridCol, gridRow, horizClear(1/0), progress }
-    // horizClear=1 means the bar sweeps horizontally (row wipe)
-    // horizClear=0 means the bar sweeps vertically   (column wipe)
-    private ArrayList<float[]> snapshotStripedEffects(ArrayList<Point> matches) {
-        ArrayList<float[]> result = new ArrayList<>();
-        for (Point p : matches) {
-            Candy c = board.get(p.x, p.y);
-            if (!(c instanceof StripedCandy)) continue;
-            StripedCandy sc = (StripedCandy) c;
-            // sc.isHorizontal()==true  → clears the ROW  → bar sweeps horizontally → horizClear=1
-            // sc.isHorizontal()==false → clears the COL  → bar sweeps vertically   → horizClear=0
-            result.add(new float[]{ p.x, p.y, sc.isHorizontal() ? 1f : 0f, 0f });
+    // ────────────────────────────────────────────────────────────────────
+    //  ANIMATION STEPS
+    // ────────────────────────────────────────────────────────────────────
+
+    private void stepLightning() {
+        if (lightningTicksRemaining > 0) {
+            float step = 1.0f / LIGHTNING_DURATION;
+            for (float[] bolt : lightningBolts) bolt[4] = Math.min(1f, bolt[4] + step);
+            lightningTicksRemaining--;
+        } else {
+            lightningBolts.clear();
+            if (pendingConversionColor >= 0) {
+                // Bomb+Stripe combo: convert the hit candies → striped on board
+                board.convertCandiesAtPoints(
+                        pendingConversionPoints, pendingConversionColor, candyImages);
+                conversionPauseTicks = CONVERSION_PAUSE_DURATION;
+                phase = Phase.CONVERSION_PAUSE;
+            } else {
+                // Normal bomb: go straight to gravity
+                phase = Phase.IDLE;
+                afterLightning();
+            }
         }
-        return result;
     }
 
-    private void buildSwipeEffects(ArrayList<float[]> snapshots) {
-        swipeEffects.clear();
-        swipeEffects.addAll(snapshots);
+    private void stepConversionPause() {
+        // Player sees the converted striped candies for a moment
+        if (conversionPauseTicks > 0) {
+            conversionPauseTicks--;
+        } else {
+            // Fire all converted striped candies simultaneously
+            swipeEffects.clear();
+            for (Point p : pendingConversionPoints) {
+                Candy c = board.get(p.x, p.y);
+                if (!(c instanceof StripedCandy)) continue;
+                StripedCandy sc = (StripedCandy) c;
+                swipeEffects.add(new float[]{ p.x, p.y, sc.isHorizontal() ? 1f : 0f, 0f });
+                ArrayList<Point> cleared = board.clearRowOrColumn(p, sc);
+                score += cleared.size();
+                board.set(p.x, p.y, null);
+            }
+            frame.setTitle("Score: " + score);
+
+            pendingConversionPoints.clear();
+            pendingConversionColor = -1;
+
+            swipeTicksRemaining = SWIPE_DURATION;
+            phase = swipeEffects.isEmpty() ? Phase.IDLE : Phase.SWIPE;
+            if (phase == Phase.IDLE) afterSwipe();
+        }
     }
 
-    // ───────────────────────────────────────────────────────────────────
-    //  SWIPE ANIMATION
-    // ───────────────────────────────────────────────────────────────────
     private void stepSwipe() {
         if (swipeTicksRemaining > 0) {
             float step = 1.0f / SWIPE_DURATION;
             for (float[] sw : swipeEffects) sw[3] = Math.min(1f, sw[3] + step);
             swipeTicksRemaining--;
         } else {
-            phase = Phase.IDLE;
             swipeEffects.clear();
+            phase = Phase.IDLE;
             afterSwipe();
         }
     }
@@ -259,21 +356,6 @@ public class Game {
         startFalling(wasEmpty);
     }
 
-    // ───────────────────────────────────────────────────────────────────
-    //  LIGHTNING ANIMATION
-    // ───────────────────────────────────────────────────────────────────
-    private void stepLightning() {
-        if (lightningTicksRemaining > 0) {
-            float step = 1.0f / LIGHTNING_DURATION;
-            for (float[] bolt : lightningBolts) bolt[4] = Math.min(1f, bolt[4] + step);
-            lightningTicksRemaining--;
-        } else {
-            phase = Phase.IDLE;
-            lightningBolts.clear();
-            afterLightning();
-        }
-    }
-
     private void afterLightning() {
         board.applyGravity();
         boolean[][] wasEmpty = captureEmpty();
@@ -281,15 +363,21 @@ public class Game {
         startFalling(wasEmpty);
     }
 
-    // ───────────────────────────────────────────────────────────────────
-    //  FALL ANIMATION
-    // ───────────────────────────────────────────────────────────────────
-    private boolean[][] captureEmpty() {
-        boolean[][] e = new boolean[SIZE][SIZE];
-        for (int row = 0; row < SIZE; row++)
-            for (int col = 0; col < SIZE; col++)
-                e[row][col] = (board.get(col, row) == null);
-        return e;
+    private void stepFalling() {
+        boolean still = false;
+        for (String key : new ArrayList<>(candyOffsets.keySet())) {
+            float off = candyOffsets.get(key);
+            if (off < 0) {
+                off = Math.min(0f, off + FALL_SPEED);
+                candyOffsets.put(key, off);
+                if (off < 0) still = true;
+            }
+        }
+        if (!still) {
+            candyOffsets.clear();
+            phase = Phase.IDLE;
+            processCascade();
+        }
     }
 
     private void startFalling(boolean[][] wasEmpty) {
@@ -310,21 +398,12 @@ public class Game {
         if (!any) processCascade();
     }
 
-    private void stepFalling() {
-        boolean still = false;
-        for (String key : new ArrayList<>(candyOffsets.keySet())) {
-            float off = candyOffsets.get(key);
-            if (off < 0) {
-                off = Math.min(0f, off + FALL_SPEED);
-                candyOffsets.put(key, off);
-                if (off < 0) still = true;
-            }
-        }
-        if (!still) {
-            candyOffsets.clear();
-            phase = Phase.IDLE;
-            processCascade();
-        }
+    private boolean[][] captureEmpty() {
+        boolean[][] e = new boolean[SIZE][SIZE];
+        for (int row = 0; row < SIZE; row++)
+            for (int col = 0; col < SIZE; col++)
+                e[row][col] = (board.get(col, row) == null);
+        return e;
     }
 
     private void processCascade() {
@@ -337,14 +416,13 @@ public class Game {
         score += toRemove.size();
         frame.setTitle("Score: " + score);
 
-        // Snapshot striped candy directions BEFORE removeMatches nulls them
-        ArrayList<float[]> stripedSnapshots = snapshotStripedEffects(toRemove);
-
+        ArrayList<float[]> snapshots = snapshotStripedEffects(toRemove);
         ArrayList<Point> extras = board.removeMatches(toRemove);
         score += extras.size();
         frame.setTitle("Score: " + score);
 
-        buildSwipeEffects(stripedSnapshots);
+        swipeEffects.clear();
+        swipeEffects.addAll(snapshots);
 
         if (!swipeEffects.isEmpty()) {
             swipeTicksRemaining = SWIPE_DURATION;
@@ -354,13 +432,33 @@ public class Game {
         }
     }
 
-    // ───────────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────────────
+    //  HELPERS
+    // ────────────────────────────────────────────────────────────────────
+
+    /** Reads striped candy directions BEFORE board.removeMatches() nulls them. */
+    private ArrayList<float[]> snapshotStripedEffects(ArrayList<Point> matches) {
+        ArrayList<float[]> result = new ArrayList<>();
+        for (Point p : matches) {
+            Candy c = board.get(p.x, p.y);
+            if (!(c instanceof StripedCandy)) continue;
+            StripedCandy sc = (StripedCandy) c;
+            result.add(new float[]{ p.x, p.y, sc.isHorizontal() ? 1f : 0f, 0f });
+        }
+        return result;
+    }
+
+    private boolean isNeighbor(Point a, Point b) {
+        return (Math.abs(a.x - b.x) == 1 && a.y == b.y) ||
+               (Math.abs(a.y - b.y) == 1 && a.x == b.x);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
     //  RENDER
-    // ───────────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────────────
     private void render(Graphics g) {
         g.drawImage(BG, 0, 0, PIXEL_SIZE, PIXEL_SIZE, null);
 
-        // Candies
         for (int row = 0; row < SIZE; row++) {
             for (int col = 0; col < SIZE; col++) {
                 Candy c = board.get(col, row);
@@ -375,201 +473,65 @@ public class Game {
 
                 g.drawImage(c.getImage(), drawX, drawY, SQUARE_SIZE, SQUARE_SIZE, null);
 
-                // Draw stripe overlay for StripedCandies
-                if (c instanceof StripedCandy) {
+                if (c instanceof StripedCandy)
                     drawStripeOverlay(g, (StripedCandy) c, drawX, drawY);
-                }
             }
         }
 
-        // Selector
         if (selected != null) {
             g.drawImage(SELECTOR,
                     selected.x * SQUARE_SIZE, selected.y * SQUARE_SIZE,
                     SQUARE_SIZE, SQUARE_SIZE, null);
         }
 
-        // Swipe effect
-        if (phase == Phase.SWIPE) drawSwipeEffects(g);
+        if (phase == Phase.LIGHTNING || phase == Phase.CONVERSION_PAUSE)
+            drawLightning(g);
 
-        // Lightning effect
-        if (phase == Phase.LIGHTNING) drawLightning(g);
+        if (phase == Phase.SWIPE)
+            drawSwipeEffects(g);
     }
 
-    // ── Stripe overlay: two white diagonal bands drawn on the candy ──────
-    /**
-     * Draws a stripe pattern over the candy cell to indicate StripedCandy.
-     * Two bright diagonal bands give the classic "striped" look.
-     * The stripe direction indicator (horizontal arrows / vertical arrows)
-     * is drawn as a subtle white arrow on top.
-     */
+    // ── Stripe overlay ───────────────────────────────────────────────────
     private void drawStripeOverlay(Graphics g, StripedCandy sc, int drawX, int drawY) {
         Graphics2D g2 = (Graphics2D) g.create();
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         g2.setClip(drawX, drawY, SQUARE_SIZE, SQUARE_SIZE);
 
-        int s = SQUARE_SIZE;
-        // Two diagonal white bands
+        int s  = SQUARE_SIZE;
+        int bw = s / 5;
         g2.setColor(new Color(255, 255, 255, 110));
-        int bw = s / 5; // band width
 
         if (sc.isHorizontal()) {
-            // Horizontal stripe → draws horizontal bands → clears ROW
-            // Two horizontal bars across the candy
             g2.fillRect(drawX, drawY + s/2 - bw/2 - bw, s, bw);
             g2.fillRect(drawX, drawY + s/2 - bw/2 + bw, s, bw);
-            // Arrow indicators pointing left and right
             g2.setColor(new Color(255, 255, 255, 200));
             g2.setStroke(new BasicStroke(2f));
             int cy = drawY + s/2;
-            // left arrow
-            g2.drawLine(drawX + 4, cy, drawX + s/4, cy);
-            g2.drawLine(drawX + 4, cy, drawX + 4 + 4, cy - 4);
-            g2.drawLine(drawX + 4, cy, drawX + 4 + 4, cy + 4);
-            // right arrow
+            g2.drawLine(drawX + 4,     cy, drawX + s/4,     cy);
+            g2.drawLine(drawX + 4,     cy, drawX + 8,       cy - 4);
+            g2.drawLine(drawX + 4,     cy, drawX + 8,       cy + 4);
             g2.drawLine(drawX + s - 4, cy, drawX + s - s/4, cy);
-            g2.drawLine(drawX + s - 4, cy, drawX + s - 4 - 4, cy - 4);
-            g2.drawLine(drawX + s - 4, cy, drawX + s - 4 - 4, cy + 4);
+            g2.drawLine(drawX + s - 4, cy, drawX + s - 8,   cy - 4);
+            g2.drawLine(drawX + s - 4, cy, drawX + s - 8,   cy + 4);
         } else {
-            // Vertical stripe → draws vertical bands → clears COLUMN
             g2.fillRect(drawX + s/2 - bw/2 - bw, drawY, bw, s);
             g2.fillRect(drawX + s/2 - bw/2 + bw, drawY, bw, s);
-            // Arrow indicators pointing up and down
             g2.setColor(new Color(255, 255, 255, 200));
             g2.setStroke(new BasicStroke(2f));
             int cx = drawX + s/2;
-            // up arrow
-            g2.drawLine(cx, drawY + 4, cx, drawY + s/4);
-            g2.drawLine(cx, drawY + 4, cx - 4, drawY + 4 + 4);
-            g2.drawLine(cx, drawY + 4, cx + 4, drawY + 4 + 4);
-            // down arrow
+            g2.drawLine(cx, drawY + 4,     cx, drawY + s/4);
+            g2.drawLine(cx, drawY + 4,     cx - 4, drawY + 8);
+            g2.drawLine(cx, drawY + 4,     cx + 4, drawY + 8);
             g2.drawLine(cx, drawY + s - 4, cx, drawY + s - s/4);
-            g2.drawLine(cx, drawY + s - 4, cx - 4, drawY + s - 4 - 4);
-            g2.drawLine(cx, drawY + s - 4, cx + 4, drawY + s - 4 - 4);
+            g2.drawLine(cx, drawY + s - 4, cx - 4, drawY + s - 8);
+            g2.drawLine(cx, drawY + s - 4, cx + 4, drawY + s - 8);
         }
-
         g2.dispose();
     }
 
-    // ── Swipe effect: two beams that burst outward from the candy cell ────
-    // Each beam travels from the striped candy's position to the board edge.
-    // horizClear=1 → two beams go left and right (row wipe)
-    // horizClear=0 → two beams go up and down   (column wipe)
-    private void drawSwipeEffects(Graphics g) {
-        Graphics2D g2 = (Graphics2D) g.create();
-        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-
-        for (float[] sw : swipeEffects) {
-            int   originCol  = (int) sw[0];
-            int   originRow  = (int) sw[1];
-            boolean horizClear = sw[2] == 1f;
-            float progress   = sw[3];   // 0 → 1
-
-            // Smooth ease-out so beams start fast and slow at edges
-            float eased = 1f - (1f - progress) * (1f - progress);
-
-            // Alpha: fade in fast, hold, then fade out
-            float alpha;
-            if (progress < 0.15f)      alpha = progress / 0.15f;
-            else if (progress < 0.75f) alpha = 1f;
-            else                       alpha = 1f - (progress - 0.75f) / 0.25f;
-            int a = Math.max(0, Math.min(255, (int)(alpha * 230)));
-
-            int originPx, maxTravel;
-
-            if (horizClear) {
-                // ── Row wipe: beams go left and right from candy column ──────
-                int rowY  = originRow * SQUARE_SIZE;
-                int thick = SQUARE_SIZE;            // beam fills full cell height
-                originPx  = originCol * SQUARE_SIZE + SQUARE_SIZE / 2; // center x
-                maxTravel = PIXEL_SIZE;             // max distance a beam can travel
-
-                // Beam going RIGHT
-                int rightReach = (int)((PIXEL_SIZE - originPx) * eased);
-                drawBeamH(g2, originPx, originPx + rightReach, rowY, thick, a, true);
-
-                // Beam going LEFT
-                int leftReach  = (int)(originPx * eased);
-                drawBeamH(g2, originPx - leftReach, originPx, rowY, thick, a, false);
-
-            } else {
-                // ── Column wipe: beams go up and down from candy row ─────────
-                int colX  = originCol * SQUARE_SIZE;
-                int thick = SQUARE_SIZE;
-                originPx  = originRow * SQUARE_SIZE + SQUARE_SIZE / 2; // center y
-                maxTravel = PIXEL_SIZE;
-
-                // Beam going DOWN
-                int downReach = (int)((PIXEL_SIZE - originPx) * eased);
-                drawBeamV(g2, colX, originPx, originPx + downReach, thick, a, true);
-
-                // Beam going UP
-                int upReach   = (int)(originPx * eased);
-                drawBeamV(g2, colX, originPx - upReach, originPx, thick, a, false);
-            }
-        }
-
-        g2.dispose();
-    }
-
-    /**
-     * Draws one horizontal beam segment from x1 to x2 in the row at rowY.
-     * leadingRight=true  → the leading (bright) edge is at x2
-     * leadingRight=false → the leading edge is at x1
-     */
-    private void drawBeamH(Graphics2D g2, int x1, int x2, int rowY, int thick, int a,
-                            boolean leadingRight) {
-        if (x2 <= x1) return;
-        int glowPad = thick / 4;
-
-        // Outer glow
-        g2.setColor(new Color(255, 240, 120, a / 4));
-        g2.fillRect(x1, rowY - glowPad, x2 - x1, thick + glowPad * 2);
-
-        // Core bright band (center half-height)
-        g2.setColor(new Color(255, 255, 255, a));
-        g2.fillRect(x1, rowY + thick / 4, x2 - x1, thick / 2);
-
-        // Softer color fill behind the core
-        g2.setColor(new Color(255, 220, 80, a / 2));
-        g2.fillRect(x1, rowY, x2 - x1, thick);
-
-        // Leading-edge spike: a thin very-bright strip at the front
-        int edgeX = leadingRight ? x2 - 6 : x1;
-        g2.setColor(new Color(255, 255, 255, Math.min(255, a + 40)));
-        g2.fillRect(edgeX, rowY, 6, thick);
-    }
-
-    /**
-     * Draws one vertical beam segment from y1 to y2 in the column at colX.
-     * leadingDown=true  → the leading edge is at y2
-     * leadingDown=false → the leading edge is at y1
-     */
-    private void drawBeamV(Graphics2D g2, int colX, int y1, int y2, int thick, int a,
-                            boolean leadingDown) {
-        if (y2 <= y1) return;
-        int glowPad = thick / 4;
-
-        // Outer glow
-        g2.setColor(new Color(255, 240, 120, a / 4));
-        g2.fillRect(colX - glowPad, y1, thick + glowPad * 2, y2 - y1);
-
-        // Core
-        g2.setColor(new Color(255, 255, 255, a));
-        g2.fillRect(colX + thick / 4, y1, thick / 2, y2 - y1);
-
-        // Color fill
-        g2.setColor(new Color(255, 220, 80, a / 2));
-        g2.fillRect(colX, y1, thick, y2 - y1);
-
-        // Leading-edge spike
-        int edgeY = leadingDown ? y2 - 6 : y1;
-        g2.setColor(new Color(255, 255, 255, Math.min(255, a + 40)));
-        g2.fillRect(colX, edgeY, thick, 6);
-    }
-
-    // ── Lightning effect (same as before, but cleaner) ───────────────────
+    // ── Lightning ────────────────────────────────────────────────────────
     private void drawLightning(Graphics g) {
+        if (lightningBolts.isEmpty()) return;
         Graphics2D g2 = (Graphics2D) g.create();
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         int half = SQUARE_SIZE / 2;
@@ -578,16 +540,15 @@ public class Game {
             float prog = bolt[4];
             if (prog <= 0f) continue;
 
-            int ox = (int)bolt[0] * SQUARE_SIZE + half;
-            int oy = (int)bolt[1] * SQUARE_SIZE + half;
-            int tx = (int)bolt[2] * SQUARE_SIZE + half;
-            int ty = (int)bolt[3] * SQUARE_SIZE + half;
-
-            int cx = ox + (int)((tx - ox) * prog);
-            int cy = oy + (int)((ty - oy) * prog);
+            int ox = (int) bolt[0] * SQUARE_SIZE + half;
+            int oy = (int) bolt[1] * SQUARE_SIZE + half;
+            int tx = (int) bolt[2] * SQUARE_SIZE + half;
+            int ty = (int) bolt[3] * SQUARE_SIZE + half;
+            int cx = ox + (int) ((tx - ox) * prog);
+            int cy = oy + (int) ((ty - oy) * prog);
 
             float alpha = prog < 0.7f ? 1f : 1f - (prog - 0.7f) / 0.3f;
-            int a = Math.max(0, Math.min(255, (int)(alpha * 255)));
+            int a = Math.max(0, Math.min(255, (int) (alpha * 255)));
 
             g2.setColor(new Color(255, 255, 200, a / 3));
             g2.setStroke(new BasicStroke(6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
@@ -606,25 +567,88 @@ public class Game {
 
     private void drawJagged(Graphics2D g2, int x1, int y1, int x2, int y2, int segs) {
         float dx = x2 - x1, dy = y2 - y1;
-        float len = (float)Math.sqrt(dx*dx + dy*dy);
+        float len = (float) Math.sqrt(dx * dx + dy * dy);
         if (len < 1f) return;
         float px = -dy / len, py = dx / len;
         float max = SQUARE_SIZE * 0.35f;
-
         int[] xs = new int[segs + 1], ys = new int[segs + 1];
         xs[0] = x1; ys[0] = y1; xs[segs] = x2; ys[segs] = y2;
         for (int i = 1; i < segs; i++) {
-            float t = (float)i / segs;
+            float t = (float) i / segs;
             float off = (rng.nextFloat() * 2 - 1) * max;
-            xs[i] = Math.round(x1 + t*dx + px*off);
-            ys[i] = Math.round(y1 + t*dy + py*off);
+            xs[i] = Math.round(x1 + t * dx + px * off);
+            ys[i] = Math.round(y1 + t * dy + py * off);
         }
-        for (int i = 0; i < segs; i++) g2.drawLine(xs[i], ys[i], xs[i+1], ys[i+1]);
+        for (int i = 0; i < segs; i++) g2.drawLine(xs[i], ys[i], xs[i + 1], ys[i + 1]);
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
-    private boolean isNeighbor(Point a, Point b) {
-        return (Math.abs(a.x - b.x) == 1 && a.y == b.y) ||
-               (Math.abs(a.y - b.y) == 1 && a.x == b.x);
+    // ── Swipe beams ──────────────────────────────────────────────────────
+    private void drawSwipeEffects(Graphics g) {
+        Graphics2D g2 = (Graphics2D) g.create();
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        for (float[] sw : swipeEffects) {
+            int   col       = (int) sw[0];
+            int   row       = (int) sw[1];
+            boolean horizClear = sw[2] == 1f;
+            float progress  = sw[3];
+
+            float eased = 1f - (1f - progress) * (1f - progress);
+
+            float alpha;
+            if      (progress < 0.15f) alpha = progress / 0.15f;
+            else if (progress < 0.75f) alpha = 1f;
+            else                       alpha = 1f - (progress - 0.75f) / 0.25f;
+            int a = Math.max(0, Math.min(255, (int) (alpha * 230)));
+
+            if (horizClear) {
+                int rowY    = row * SQUARE_SIZE;
+                int thick   = SQUARE_SIZE;
+                int originX = col * SQUARE_SIZE + SQUARE_SIZE / 2;
+                int rReach  = (int) ((PIXEL_SIZE - originX) * eased);
+                int lReach  = (int) (originX * eased);
+                drawBeamH(g2, originX, originX + rReach, rowY, thick, a, true);
+                drawBeamH(g2, originX - lReach, originX, rowY, thick, a, false);
+            } else {
+                int colX    = col * SQUARE_SIZE;
+                int thick   = SQUARE_SIZE;
+                int originY = row * SQUARE_SIZE + SQUARE_SIZE / 2;
+                int dReach  = (int) ((PIXEL_SIZE - originY) * eased);
+                int uReach  = (int) (originY * eased);
+                drawBeamV(g2, colX, originY, originY + dReach, thick, a, true);
+                drawBeamV(g2, colX, originY - uReach, originY, thick, a, false);
+            }
+        }
+        g2.dispose();
+    }
+
+    private void drawBeamH(Graphics2D g2, int x1, int x2, int rowY,
+                            int thick, int a, boolean leadRight) {
+        if (x2 <= x1) return;
+        int pad = thick / 4;
+        g2.setColor(new Color(255, 240, 120, a / 4));
+        g2.fillRect(x1, rowY - pad, x2 - x1, thick + pad * 2);
+        g2.setColor(new Color(255, 220, 80, a / 2));
+        g2.fillRect(x1, rowY, x2 - x1, thick);
+        g2.setColor(new Color(255, 255, 255, a));
+        g2.fillRect(x1, rowY + thick / 4, x2 - x1, thick / 2);
+        int ex = leadRight ? x2 - 6 : x1;
+        g2.setColor(new Color(255, 255, 255, Math.min(255, a + 40)));
+        g2.fillRect(ex, rowY, 6, thick);
+    }
+
+    private void drawBeamV(Graphics2D g2, int colX, int y1, int y2,
+                            int thick, int a, boolean leadDown) {
+        if (y2 <= y1) return;
+        int pad = thick / 4;
+        g2.setColor(new Color(255, 240, 120, a / 4));
+        g2.fillRect(colX - pad, y1, thick + pad * 2, y2 - y1);
+        g2.setColor(new Color(255, 220, 80, a / 2));
+        g2.fillRect(colX, y1, thick, y2 - y1);
+        g2.setColor(new Color(255, 255, 255, a));
+        g2.fillRect(colX + thick / 4, y1, thick / 2, y2 - y1);
+        int ey = leadDown ? y2 - 6 : y1;
+        g2.setColor(new Color(255, 255, 255, Math.min(255, a + 40)));
+        g2.fillRect(colX, ey, thick, 6);
     }
 }
