@@ -55,7 +55,8 @@ public class Game {
     private Random rng = new Random();
     private javax.swing.Timer animTimer;
 
-    // ── Phase state machine ───────────────────────────────────────────────
+    // ── Cascade combo counter ─────────────────────────────────────────────
+    private int cascadeCount = 0;
     private enum Phase { IDLE, LIGHTNING, CONVERSION_PAUSE, SWIPE, FALLING }
     private Phase phase = Phase.IDLE;
 
@@ -97,8 +98,13 @@ public class Game {
 
         animTimer = new javax.swing.Timer(16, e -> {
             // ── Delegate hint logic to HintSystem ────────────────────────
-            if (phase == Phase.IDLE) hintSystem.tick();
-            else                     hintSystem.cancelHint();
+            if (phase == Phase.IDLE) {
+                boolean wasActive = hintSystem.isActive();
+                hintSystem.tick();
+                if (!wasActive && hintSystem.isActive()) SoundManager.playHint();
+            } else {
+                hintSystem.cancelHint();
+            }
 
             switch (phase) {
                 case LIGHTNING:        stepLightning();       break;
@@ -121,6 +127,9 @@ public class Game {
 
         topPanel.update(score, movesLeft, progress);
         frame.setTitle("Sugar Rush Saga — " + currentLevel.getGoalDescription());
+
+        // ── Start background music ────────────────────────────────────────
+        SoundManager.startMusic();
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -147,6 +156,7 @@ public class Game {
 
         if (selected == null) {
             selected = new Point(x, y);
+            SoundManager.playSelect();
             return;
         }
 
@@ -178,6 +188,7 @@ public class Game {
             for (Point p : cB) notifyClearedAt(p);
 
             addScore(cA.size() + cB.size() + 2);
+            SoundManager.playStriped();
 
             movesLeft--;
             updateUI();
@@ -213,6 +224,7 @@ public class Game {
             pendingConversionColor = color;
 
             addScore(2);
+            SoundManager.playBomb();
 
             movesLeft--;
             updateUI();
@@ -247,6 +259,7 @@ public class Game {
             for (Point p : destroyed) progress.notifyCandyCleared(colorToDestroy);
 
             addScore(destroyed.size() + 1);
+            SoundManager.playBomb();
 
             lightningBolts.clear();
             for (Point d : destroyed) {
@@ -275,6 +288,8 @@ public class Game {
             return;
         }
 
+        cascadeCount = 0;   // reset cascade counter for this move
+
         // ── Snapshot original candy types BEFORE createSpecials converts ────
         // any anchor cell into a StripedCandy/BombCandy.  This lets us count
         // that candy toward COLLECT_CANDY goals (real Candy Crush behaviour:
@@ -290,10 +305,12 @@ public class Game {
         ArrayList<Point> specials = board.createSpecials(
                 groups, selected, second, candyImages, bombImg);
 
+        boolean madeStriped = false;
         for (Point sp : specials) {
             Candy created = board.get(sp.x, sp.y);
             if (created instanceof StripedCandy) {
                 progress.notifyStripedCreated();
+                madeStriped = true;
             }
             // Count the candy that BECAME a special — it was a real candy
             // of the matched colour and must be included in the collection tally.
@@ -302,6 +319,9 @@ public class Game {
                 progress.notifyCandyCleared(origType);
             }
         }
+
+        if (madeStriped) SoundManager.playStriped();
+        else             SoundManager.playMatch();
 
         ArrayList<Point> toRemove = new ArrayList<>();
         for (Board.MatchGroup g : groups) {
@@ -467,6 +487,9 @@ public class Game {
         ArrayList<Board.MatchGroup> groups = board.findMatchGroups();
         if (groups.isEmpty()) return;
 
+        cascadeCount++;
+        SoundManager.playCombo(cascadeCount);
+
         ArrayList<Point> toRemove = new ArrayList<>();
         for (Board.MatchGroup g : groups) toRemove.addAll(g.points);
 
@@ -503,11 +526,15 @@ public class Game {
             int next = currentLevel.getLevelNumber() + 1;
             if (next > SaveManager.loadLevel()) SaveManager.saveLevel(next);
             animTimer.stop();
+            SoundManager.stopMusic();
+            SoundManager.playWin();
             SwingUtilities.invokeLater(() -> showWinDialog(next));
             return;
         }
         if (movesLeft <= 0) {
             animTimer.stop();
+            SoundManager.stopMusic();
+            SoundManager.playFail();
             SwingUtilities.invokeLater(this::showLoseDialog);
         }
     }
@@ -572,6 +599,7 @@ public class Game {
         mapBtn.addActionListener(e -> {
             dialog.dispose();
             frame.dispose();
+            SoundManager.stopMusic();
             JFrame mapFrame = new JFrame("Level Map");
             mapFrame.setSize(500, 800);
             mapFrame.add(new LevelMap());
