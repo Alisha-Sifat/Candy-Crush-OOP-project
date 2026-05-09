@@ -1,200 +1,155 @@
-import com.candycrush.Candy;
 import java.awt.*;
 import java.util.ArrayList;
 
 /**
- * Hint system — exactly like real Candy Crush.
+ * HintSystem — manages the idle-hint feature for Sugar Rush Saga.
  *
- * How it works:
- *   1. call findHint(board) → stores the best swap (two adjacent cells)
- *   2. Game.java calls draw(g, squareSize) every frame inside render()
- *      while isActive() is true — draws a pulsing glow on the two cells
- *   3. call tick() every timer tick to advance the animation
- *   4. The hint auto-expires after HINT_DURATION ticks (~3 seconds)
+ * After the player is idle for ~3 seconds, this class:
+ *   1. Scans the board for a valid swap (findHint).
+ *   2. Draws a pulsing golden glow around those two candies.
  *
- * If no valid swap exists (very rare), hint stays null and nothing is drawn.
- *
- * Also shows a "No moves!" idle timer: if the player hasn't moved for
- * IDLE_TICKS frames, the hint fires automatically (just like Candy Crush).
+ * Usage in Game.java:
+ *   • Create once:  hintSystem = new HintSystem(board, SQUARE_SIZE, SIZE);
+ *   • Every IDLE tick:       hintSystem.tick();
+ *   • Every non-IDLE tick:   hintSystem.cancelHint();
+ *   • On player click:       hintSystem.reset();
+ *   • During render (IDLE):  hintSystem.draw(g);
  */
 public class HintSystem {
 
-    // ── Timing ────────────────────────────────────────────────────────────
-    private static final int HINT_DURATION = 180;  // ~3 s at 60 fps
-    private static final int IDLE_TICKS    = 300;  // ~5 s of inactivity
+    // ── Dependencies ──────────────────────────────────────────────────────
+    private final Board board;
+    private final int   squareSize;
+    private final int   boardSize;
 
     // ── State ─────────────────────────────────────────────────────────────
-    private Point  hintA     = null;   // first  cell of best swap
-    private Point  hintB     = null;   // second cell of best swap
-    private int    ticksLeft = 0;
-    private float  pulse     = 0f;
-    private int    idleTicks = 0;
+    private Point[] hintPair      = null;   // the two candies to highlight
+    private float   hintPulse     = 0f;     // drives the glow animation
+    private int     hintIdleTicks = 0;      // counts idle frames
 
-    private boolean active   = false;
+    /** Frames of idle time before a hint appears (~3 s at 16 ms/tick). */
+    private static final int HINT_DELAY_TICKS = 180;
 
     // ─────────────────────────────────────────────────────────────────────
-
-    /** Returns true while the hint animation is visible. */
-    public boolean isActive() { return active; }
-
-    /** Call this every time the player makes a move (resets idle timer). */
-    public void resetIdle() {
-        idleTicks = 0;
-        hide();
+    //  CONSTRUCTOR
+    // ─────────────────────────────────────────────────────────────────────
+    public HintSystem(Board board, int squareSize, int boardSize) {
+        this.board      = board;
+        this.squareSize = squareSize;
+        this.boardSize  = boardSize;
     }
 
-    /**
-     * Tick every timer frame (16 ms).
-     * Advances pulse animation; counts idle time; auto-fires if idle too long.
-     * Pass the board so the auto-hint can search it.
-     */
-    public void tick(Board board) {
-        pulse = (float)(Math.sin(System.currentTimeMillis() / 250.0) * 0.5 + 0.5);
+    // ─────────────────────────────────────────────────────────────────────
+    //  PUBLIC API  (called by Game.java)
+    // ─────────────────────────────────────────────────────────────────────
 
-        if (active) {
-            if (ticksLeft-- <= 0) hide();
-        } else {
-            idleTicks++;
-            if (idleTicks >= IDLE_TICKS) {
-                findHint(board);
-                idleTicks = 0;
-            }
+    /**
+     * Call every animation tick while the game is in the IDLE phase.
+     * Increments the idle counter and advances the pulse animation once
+     * the delay has elapsed.
+     */
+    public void tick() {
+        hintIdleTicks++;
+        if (hintIdleTicks >= HINT_DELAY_TICKS) {
+            if (hintPair == null) hintPair = findHint();
+            hintPulse += 0.08f;
+            if (hintPulse > 2 * Math.PI) hintPulse -= (float)(2 * Math.PI);
         }
     }
 
     /**
-     * Manually request a hint (player pressed 💡).
-     * Finds the best swap and shows it immediately.
+     * Call every animation tick while the game is NOT in IDLE phase
+     * (i.e. during animations).  Suppresses any active hint.
      */
-    public void requestHint(Board board) {
-        findHint(board);
-        idleTicks = 0;
-    }
-
-    /** Hides the current hint. */
-    public void hide() {
-        active = false;
-        hintA  = null;
-        hintB  = null;
-    }
-
-    // ── Hint search ───────────────────────────────────────────────────────
-
-    /**
-     * Scans every adjacent pair, tries swapping, checks for 3-in-a-row.
-     * Prefers moves that produce longer matches (greedy heuristic).
-     */
-    private void findHint(Board board) {
-        int size = board.getSize();
-        int bestScore = 0;
-        Point bestA = null, bestB = null;
-
-        for (int y = 0; y < size; y++) {
-            for (int x = 0; x < size; x++) {
-                // Try right neighbour
-                if (x + 1 < size) {
-                    Point a = new Point(x, y), b = new Point(x + 1, y);
-                    int s = scoreSwap(board, a, b);
-                    if (s > bestScore) { bestScore = s; bestA = a; bestB = b; }
-                }
-                // Try down neighbour
-                if (y + 1 < size) {
-                    Point a = new Point(x, y), b = new Point(x, y + 1);
-                    int s = scoreSwap(board, a, b);
-                    if (s > bestScore) { bestScore = s; bestA = a; bestB = b; }
-                }
-            }
-        }
-
-        if (bestA != null) {
-            hintA     = bestA;
-            hintB     = bestB;
-            ticksLeft = HINT_DURATION;
-            active    = true;
-        }
+    public void cancelHint() {
+        hintIdleTicks = 0;
+        hintPair      = null;
+        hintPulse     = 0f;
     }
 
     /**
-     * Temporarily swaps two cells, counts the matches, then swaps back.
-     * Returns total matched cells (higher = better move).
+     * Call when the player clicks / makes a move.
+     * Resets the idle countdown so the hint timer starts fresh.
      */
-    private int scoreSwap(Board board, Point a, Point b) {
-        board.swap(a, b);
-        ArrayList<Point> matches = board.findMatches();
-        int count = matches.size();
-        board.swap(a, b); // undo
-        return count;
+    public void reset() {
+        hintPair      = null;
+        hintPulse     = 0f;
+        hintIdleTicks = 0;
     }
 
-    // ── Drawing ───────────────────────────────────────────────────────────
+    /** @return true while a hint is being shown on screen. */
+    public boolean isActive() {
+        return hintPair != null;
+    }
 
     /**
-     * Draw the hint highlight on the board.
-     * Call this inside Game.render(), after the candies are drawn.
-     *
-     * @param g          graphics context (the board panel's Graphics)
-     * @param squareSize pixel size of one grid cell
+     * Draws the pulsing golden glow around the two hint candies.
+     * Call this from Game.render() only when phase == IDLE and isActive().
      */
-    public void draw(Graphics g, int squareSize) {
-        if (!active || hintA == null || hintB == null) return;
+    public void draw(Graphics g) {
+        if (hintPair == null) return;
 
         Graphics2D g2 = (Graphics2D) g.create();
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-        drawHintCell(g2, hintA, squareSize);
-        drawHintCell(g2, hintB, squareSize);
+        float alpha = (float)(0.45 + 0.45 * Math.sin(hintPulse));
+        int   a     = Math.max(0, Math.min(255, (int)(alpha * 255)));
 
-        // Arrow between the two cells
-        drawArrow(g2, hintA, hintB, squareSize);
+        // ── Wide outer glow ───────────────────────────────────────────────
+        g2.setColor(new Color(255, 230, 0, a / 3));
+        g2.setStroke(new BasicStroke(10f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        for (Point p : hintPair)
+            g2.drawRoundRect(p.x * squareSize + 4, p.y * squareSize + 4,
+                             squareSize - 8, squareSize - 8, 12, 12);
+
+        // ── Sharp inner ring ──────────────────────────────────────────────
+        g2.setColor(new Color(255, 220, 0, a));
+        g2.setStroke(new BasicStroke(3.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        for (Point p : hintPair)
+            g2.drawRoundRect(p.x * squareSize + 4, p.y * squareSize + 4,
+                             squareSize - 8, squareSize - 8, 12, 12);
+
+        // ── Subtle fill tint ─────────────────────────────────────────────
+        g2.setColor(new Color(255, 255, 150, a / 5));
+        for (Point p : hintPair)
+            g2.fillRoundRect(p.x * squareSize + 4, p.y * squareSize + 4,
+                             squareSize - 8, squareSize - 8, 12, 12);
 
         g2.dispose();
     }
 
-    private void drawHintCell(Graphics2D g2, Point p, int sq) {
-        int x = p.x * sq;
-        int y = p.y * sq;
+    // ─────────────────────────────────────────────────────────────────────
+    //  PRIVATE — BOARD SCAN
+    // ─────────────────────────────────────────────────────────────────────
 
-        // Outer glow rings (multiple passes, fading outward)
-        for (int i = 12; i >= 2; i -= 2) {
-            float alpha = (1f - (float)i / 14f) * 0.6f * (0.5f + pulse * 0.5f);
-            g2.setColor(new Color(255, 230, 0, (int)(alpha * 255)));
-            g2.setStroke(new BasicStroke(i, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-            g2.drawRoundRect(x + i/2, y + i/2, sq - i, sq - i, 14, 14);
+    /**
+     * Scans every adjacent pair on the board and returns the first swap
+     * that would produce a 3+ match, as [pointA, pointB].
+     * Returns null if no valid move exists (board is stuck).
+     */
+    private Point[] findHint() {
+        for (int y = 0; y < boardSize; y++) {
+            for (int x = 0; x < boardSize; x++) {
+
+                // Try swapping right
+                if (x + 1 < boardSize) {
+                    Point a = new Point(x, y), b = new Point(x + 1, y);
+                    board.swap(a, b);
+                    boolean valid = !board.findMatchGroups().isEmpty();
+                    board.swap(a, b);   // always restore
+                    if (valid) return new Point[]{a, b};
+                }
+
+                // Try swapping down
+                if (y + 1 < boardSize) {
+                    Point a = new Point(x, y), b = new Point(x, y + 1);
+                    board.swap(a, b);
+                    boolean valid = !board.findMatchGroups().isEmpty();
+                    board.swap(a, b);   // always restore
+                    if (valid) return new Point[]{a, b};
+                }
+            }
         }
-
-        // Bright inner border
-        float brightness = 0.7f + pulse * 0.3f;
-        g2.setColor(new Color(1f, 0.9f, 0f, brightness));
-        g2.setStroke(new BasicStroke(3f));
-        g2.drawRoundRect(x + 3, y + 3, sq - 6, sq - 6, 12, 12);
-
-        // Subtle fill tint
-        g2.setColor(new Color(255, 255, 100, (int)(40 + pulse * 30)));
-        g2.fillRoundRect(x + 4, y + 4, sq - 8, sq - 8, 10, 10);
-    }
-
-    private void drawArrow(Graphics2D g2, Point a, Point b, int sq) {
-        // Centre of each cell
-        int ax = a.x * sq + sq / 2;
-        int ay = a.y * sq + sq / 2;
-        int bx = b.x * sq + sq / 2;
-        int by = b.y * sq + sq / 2;
-
-        float alpha = 0.6f + pulse * 0.4f;
-        g2.setColor(new Color(255, 255, 255, (int)(alpha * 220)));
-        g2.setStroke(new BasicStroke(3f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-
-        // Line
-        g2.drawLine(ax, ay, bx, by);
-
-        // Arrowhead at b
-        double angle = Math.atan2(by - ay, bx - ax);
-        int ahs = 10; // arrowhead size
-        int x1 = bx - (int)(Math.cos(angle - 0.5) * ahs);
-        int y1 = by - (int)(Math.sin(angle - 0.5) * ahs);
-        int x2 = bx - (int)(Math.cos(angle + 0.5) * ahs);
-        int y2 = by - (int)(Math.sin(angle + 0.5) * ahs);
-        g2.drawLine(bx, by, x1, y1);
-        g2.drawLine(bx, by, x2, y2);
+        return null;   // no valid move found
     }
 }

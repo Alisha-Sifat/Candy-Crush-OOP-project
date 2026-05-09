@@ -1,6 +1,3 @@
-
-
-
 import com.candycrush.Candy;
 
 public class NormalCandy extends Candy {

@@ -1,6 +1,7 @@
 import com.candycrush.Candy;
 import java.awt.*;
 import java.awt.event.*;
+import java.awt.geom.RoundRectangle2D;
 import java.io.File;
 import java.io.IOException;
 import javax.imageio.ImageIO;
@@ -18,7 +19,7 @@ public class Game {
     final int SQUARE_SIZE = PIXEL_SIZE / SIZE;
 
     Level         currentLevel;
-    LevelProgress progress;      // ← tracks goal progress
+    LevelProgress progress;
     int movesLeft;
     int score = 0;
 
@@ -58,6 +59,9 @@ public class Game {
     private enum Phase { IDLE, LIGHTNING, CONVERSION_PAUSE, SWIPE, FALLING }
     private Phase phase = Phase.IDLE;
 
+    // ── Hint system (all logic lives in HintSystem.java) ─────────────────
+    private HintSystem hintSystem;
+
     // ─────────────────────────────────────────────────────────────────────
     //  STARTUP
     // ─────────────────────────────────────────────────────────────────────
@@ -74,6 +78,7 @@ public class Game {
         }
 
         board.initBoard(candyImages);
+        hintSystem = new HintSystem(board, SQUARE_SIZE, SIZE);
 
         panel = new JPanel() {
             protected void paintComponent(Graphics g) { render(g); }
@@ -83,6 +88,7 @@ public class Game {
         panel.addMouseListener(new MouseAdapter() {
             public void mouseClicked(MouseEvent e) {
                 if (phase == Phase.IDLE) {
+                    hintSystem.reset();
                     handleClick(e);
                     panel.repaint();
                 }
@@ -90,6 +96,10 @@ public class Game {
         });
 
         animTimer = new javax.swing.Timer(16, e -> {
+            // ── Delegate hint logic to HintSystem ────────────────────────
+            if (phase == Phase.IDLE) hintSystem.tick();
+            else                     hintSystem.cancelHint();
+
             switch (phase) {
                 case LIGHTNING:        stepLightning();       break;
                 case CONVERSION_PAUSE: stepConversionPause(); break;
@@ -109,7 +119,6 @@ public class Game {
         frame.setVisible(true);
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 
-        // Show goal description as a brief tooltip at startup
         topPanel.update(score, movesLeft, progress);
         frame.setTitle("Sugar Rush Saga — " + currentLevel.getGoalDescription());
     }
@@ -122,7 +131,7 @@ public class Game {
             this.currentLevel = level;
             this.movesLeft    = level.getMaxMoves();
             this.score        = 0;
-            this.progress     = new LevelProgress(level);   // fresh tracker
+            this.progress     = new LevelProgress(level);
             run();
         } catch (Exception e) {
             e.printStackTrace();
@@ -165,13 +174,11 @@ public class Game {
             board.set(selected.x, selected.y, null);
             board.set(second.x,   second.y,   null);
 
-            // Notify progress for every candy cleared
             for (Point p : cA) notifyClearedAt(p);
             for (Point p : cB) notifyClearedAt(p);
 
-            addScore((cA.size() + cB.size()) * 40);
+            addScore(cA.size() + cB.size() + 2);
 
-            // Double-stripe costs a move
             movesLeft--;
             updateUI();
             checkGameEnd();
@@ -192,7 +199,6 @@ public class Game {
             board.set(selected.x, selected.y, null);
             board.set(second.x,   second.y,   null);
 
-            // The bomb itself is "burst"
             progress.notifyBombBurst();
 
             ArrayList<Point> targets = board.findCandiesOfColor(color);
@@ -206,7 +212,7 @@ public class Game {
             pendingConversionPoints.addAll(targets);
             pendingConversionColor = color;
 
-            addScore(50); // bomb+stripe activation bonus
+            addScore(2);
 
             movesLeft--;
             updateUI();
@@ -234,15 +240,13 @@ public class Game {
             Point bombAfter = (board.get(second.x, second.y) instanceof BombCandy) ? second : selected;
             board.set(bombAfter.x, bombAfter.y, null);
 
-            // Bomb is burst
             progress.notifyBombBurst();
 
             ArrayList<Point> destroyed = board.clearColor(colorToDestroy);
 
-            // Notify for every candy destroyed by the bomb
             for (Point p : destroyed) progress.notifyCandyCleared(colorToDestroy);
 
-            addScore(destroyed.size() * 30);
+            addScore(destroyed.size() + 1);
 
             lightningBolts.clear();
             for (Point d : destroyed) {
@@ -266,24 +270,39 @@ public class Game {
         ArrayList<Board.MatchGroup> groups = board.findMatchGroups();
 
         if (groups.isEmpty()) {
-            board.swap(selected, second); // revert
+            board.swap(selected, second);
             selected = null;
             return;
         }
 
-        // Create specials (4-in-a-row → striped, 5+ → bomb)
+        // ── Snapshot original candy types BEFORE createSpecials converts ────
+        // any anchor cell into a StripedCandy/BombCandy.  This lets us count
+        // that candy toward COLLECT_CANDY goals (real Candy Crush behaviour:
+        // all N candies in a 4-in-a-row count, including the one that becomes
+        // the striped candy).
+        java.util.Map<String, Integer> preSpecialTypes = new java.util.HashMap<>();
+        for (Board.MatchGroup g : groups)
+            for (Point p : g.points) {
+                Candy c = board.get(p.x, p.y);
+                if (c != null) preSpecialTypes.put(p.x + "," + p.y, c.getType());
+            }
+
         ArrayList<Point> specials = board.createSpecials(
                 groups, selected, second, candyImages, bombImg);
 
-        // Notify for each striped candy created
         for (Point sp : specials) {
             Candy created = board.get(sp.x, sp.y);
             if (created instanceof StripedCandy) {
                 progress.notifyStripedCreated();
             }
+            // Count the candy that BECAME a special — it was a real candy
+            // of the matched colour and must be included in the collection tally.
+            Integer origType = preSpecialTypes.get(sp.x + "," + sp.y);
+            if (origType != null && origType >= 0) {
+                progress.notifyCandyCleared(origType);
+            }
         }
 
-        // Collect points to remove (skip special anchors)
         ArrayList<Point> toRemove = new ArrayList<>();
         for (Board.MatchGroup g : groups) {
             for (Point p : g.points) {
@@ -295,36 +314,22 @@ public class Game {
             }
         }
 
-        // Notify for each normal candy being cleared
+        // Count the remaining (non-anchor) cleared candies
         for (Point p : toRemove) {
             Candy c = board.get(p.x, p.y);
             if (c != null) progress.notifyCandyCleared(c.getType());
         }
 
-        // Score per candy: 20 for 3-match, 30 for 4-match, 50 for 5+ match
-        int matchScore = 0;
-        for (Board.MatchGroup g : groups) {
-            int sz = g.size();
-            int perCandy = sz >= 5 ? 50 : sz == 4 ? 30 : 20;
-            matchScore += sz * perCandy;
-        }
-        addScore(matchScore);
+        addScore(toRemove.size());
 
         movesLeft--;
         updateUI();
         checkGameEnd();
 
-        // Snapshot striped directions BEFORE removeMatches nulls them
         ArrayList<float[]> stripedSnapshots = snapshotStripedEffects(toRemove);
         ArrayList<Point> extras = board.removeMatches(toRemove);
 
-        // Notify for extra candies cleared by striped effects
-        for (Point ep : extras) {
-            Candy c = board.get(ep.x, ep.y);
-            // The cell is already null after removeMatches; use type from position
-            // (extras are already nulled in board — score them but type unknown)
-        }
-        addScore(extras.size() * 25); // 25 pts per extra candy from striped
+        addScore(extras.size());
 
         swipeEffects.clear();
         swipeEffects.addAll(stripedSnapshots);
@@ -373,7 +378,7 @@ public class Game {
                 swipeEffects.add(new float[]{ p.x, p.y, sc.isHorizontal() ? 1f : 0f, 0f });
                 ArrayList<Point> cleared = board.clearRowOrColumn(p, sc);
                 for (Point cp : cleared) notifyClearedAt(cp);
-                addScore(cleared.size() * 25); // striped beam from bomb+stripe combo
+                addScore(cleared.size());
                 board.set(p.x, p.y, null);
             }
 
@@ -470,12 +475,11 @@ public class Game {
             if (c != null) progress.notifyCandyCleared(c.getType());
         }
 
-        // Cascade bonus: 25 per candy (slightly more than base 3-match)
-        addScore(toRemove.size() * 25);
+        addScore(toRemove.size());
 
         ArrayList<float[]> snapshots = snapshotStripedEffects(toRemove);
         ArrayList<Point> extras = board.removeMatches(toRemove);
-        addScore(extras.size() * 25); // cascade striped extras
+        addScore(extras.size());
 
         swipeEffects.clear();
         swipeEffects.addAll(snapshots);
@@ -492,69 +496,225 @@ public class Game {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  HELPERS
+    //  GAME END — FANCY DIALOGS
     // ─────────────────────────────────────────────────────────────────────
-
-    /** Increment score and notify progress tracker. */
-    private void addScore(int amount) {
-        score += amount;
-        progress.notifyScoreUpdated(score);
-        frame.setTitle("Score: " + score);
-    }
-
-    /** Notify progress that a candy at grid position p was cleared. */
-    private void notifyClearedAt(Point p) {
-        Candy c = board.get(p.x, p.y);
-        if (c != null) progress.notifyCandyCleared(c.getType());
-    }
-
-    private ArrayList<float[]> snapshotStripedEffects(ArrayList<Point> matches) {
-        ArrayList<float[]> result = new ArrayList<>();
-        for (Point p : matches) {
-            Candy c = board.get(p.x, p.y);
-            if (!(c instanceof StripedCandy)) continue;
-            StripedCandy sc = (StripedCandy) c;
-            result.add(new float[]{ p.x, p.y, sc.isHorizontal() ? 1f : 0f, 0f });
-        }
-        return result;
-    }
-
-    private boolean isNeighbor(Point a, Point b) {
-        return (Math.abs(a.x - b.x) == 1 && a.y == b.y) ||
-               (Math.abs(a.y - b.y) == 1 && a.x == b.x);
-    }
-
-    private void updateUI() {
-        topPanel.update(score, movesLeft, progress);
-    }
-
-    /**
-     * Checks win/loss after every move.
-     * Win  → goal is complete (regardless of moves left).
-     * Loss → moves ran out before goal was reached.
-     */
     private void checkGameEnd() {
         if (progress.isGoalComplete()) {
-            // Save progress and unlock next level
             int next = currentLevel.getLevelNumber() + 1;
             if (next > SaveManager.loadLevel()) SaveManager.saveLevel(next);
-
-            JOptionPane.showMessageDialog(frame,
-                    "🎉 Level Complete!\n" + currentLevel.getGoalDescription(),
-                    "You Win!", JOptionPane.INFORMATION_MESSAGE);
-            frame.dispose();
-            new LevelSelect().showLevels();
+            animTimer.stop();
+            SwingUtilities.invokeLater(() -> showWinDialog(next));
             return;
         }
-
         if (movesLeft <= 0) {
-            JOptionPane.showMessageDialog(frame,
-                    "😢 Out of moves!\n"
-                    + progress.getProgressText() + " (need " + progress.getTarget() + ")",
-                    "Game Over", JOptionPane.WARNING_MESSAGE);
-            frame.dispose();
-            new LevelSelect().showLevels();
+            animTimer.stop();
+            SwingUtilities.invokeLater(this::showLoseDialog);
         }
+    }
+
+    /** ★ Fancy win dialog with Next Level / Map buttons ★ */
+    private void showWinDialog(int nextLevelNum) {
+        JDialog dialog = new JDialog(frame, true);
+        dialog.setUndecorated(true);
+        dialog.setSize(360, 340);
+        dialog.setLocationRelativeTo(frame);
+
+        JPanel content = new JPanel() {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g;
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                // Outer gold ring
+                GradientPaint outer = new GradientPaint(0, 0, new Color(255, 200, 0),
+                        0, getHeight(), new Color(255, 120, 0));
+                g2.setPaint(outer);
+                g2.fill(new RoundRectangle2D.Float(0, 0, getWidth(), getHeight(), 32, 32));
+                // Inner card
+                GradientPaint inner = new GradientPaint(0, 18, new Color(255, 252, 220),
+                        0, getHeight(), new Color(255, 235, 160));
+                g2.setPaint(inner);
+                g2.fill(new RoundRectangle2D.Float(8, 8, getWidth() - 16, getHeight() - 16, 24, 24));
+            }
+        };
+        content.setLayout(null);
+        content.setOpaque(false);
+
+        // Trophy
+        JLabel trophy = new JLabel("🏆", SwingConstants.CENTER);
+        trophy.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 64));
+        trophy.setBounds(0, 18, 360, 80);
+        content.add(trophy);
+
+        // YOU WIN!
+        JLabel winLbl = new JLabel("YOU WIN!", SwingConstants.CENTER);
+        winLbl.setFont(new Font("Arial Black", Font.BOLD, 32));
+        winLbl.setForeground(new Color(200, 80, 0));
+        winLbl.setBounds(0, 100, 360, 42);
+        content.add(winLbl);
+
+        // Goal completed
+        JLabel goalLbl = new JLabel(currentLevel.getGoalDescription(), SwingConstants.CENTER);
+        goalLbl.setFont(new Font("Arial", Font.PLAIN, 13));
+        goalLbl.setForeground(new Color(100, 70, 0));
+        goalLbl.setBounds(0, 145, 360, 22);
+        content.add(goalLbl);
+
+        // Score
+        JLabel scoreLbl = new JLabel("⭐  Score: " + score + "  ⭐", SwingConstants.CENTER);
+        scoreLbl.setFont(new Font("Arial", Font.BOLD, 17));
+        scoreLbl.setForeground(new Color(160, 100, 0));
+        scoreLbl.setBounds(0, 168, 360, 28);
+        content.add(scoreLbl);
+
+        // ── Map button
+        JButton mapBtn = makeFancyButton("🗺  Map", new Color(80, 150, 255));
+        mapBtn.setBounds(28, 225, 140, 52);
+        mapBtn.addActionListener(e -> {
+            dialog.dispose();
+            frame.dispose();
+            JFrame mapFrame = new JFrame("Level Map");
+            mapFrame.setSize(500, 800);
+            mapFrame.add(new LevelMap());
+            mapFrame.setVisible(true);
+            mapFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        });
+        content.add(mapBtn);
+
+        // ── Next Level button (only if another level exists)
+        boolean hasNext = nextLevelNum <= LevelManager.getLevels().size();
+        if (hasNext) {
+            JButton nextBtn = makeFancyButton("▶  Next Level", new Color(50, 190, 90));
+            nextBtn.setBounds(192, 225, 140, 52);
+            nextBtn.addActionListener(e -> {
+                dialog.dispose();
+                frame.dispose();
+                Level nextLvl = LevelManager.getLevels().get(nextLevelNum - 1);
+                new Game().startLevel(nextLvl);
+            });
+            content.add(nextBtn);
+        }
+
+        dialog.setContentPane(content);
+        try { dialog.setShape(new RoundRectangle2D.Float(0, 0, 360, 340, 32, 32)); }
+        catch (Exception ignored) {}
+        dialog.setVisible(true);
+    }
+
+    /** ★ Fancy lose dialog with Try Again / Map buttons ★ */
+    private void showLoseDialog() {
+        JDialog dialog = new JDialog(frame, true);
+        dialog.setUndecorated(true);
+        dialog.setSize(340, 310);
+        dialog.setLocationRelativeTo(frame);
+
+        JPanel content = new JPanel() {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g;
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                // Outer red ring
+                GradientPaint outer = new GradientPaint(0, 0, new Color(220, 60, 60),
+                        0, getHeight(), new Color(120, 20, 20));
+                g2.setPaint(outer);
+                g2.fill(new RoundRectangle2D.Float(0, 0, getWidth(), getHeight(), 32, 32));
+                // Inner card
+                GradientPaint inner = new GradientPaint(0, 8, new Color(255, 240, 240),
+                        0, getHeight(), new Color(255, 210, 210));
+                g2.setPaint(inner);
+                g2.fill(new RoundRectangle2D.Float(8, 8, getWidth() - 16, getHeight() - 16, 24, 24));
+            }
+        };
+        content.setLayout(null);
+        content.setOpaque(false);
+
+        // Broken heart
+        JLabel emoji = new JLabel("💔", SwingConstants.CENTER);
+        emoji.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 58));
+        emoji.setBounds(0, 18, 340, 72);
+        content.add(emoji);
+
+        // OUT OF MOVES
+        JLabel lbl = new JLabel("OUT OF MOVES", SwingConstants.CENTER);
+        lbl.setFont(new Font("Arial Black", Font.BOLD, 26));
+        lbl.setForeground(new Color(180, 30, 30));
+        lbl.setBounds(0, 93, 340, 36);
+        content.add(lbl);
+
+        // Progress text
+        JLabel progressLbl = new JLabel(progress.getProgressText(), SwingConstants.CENTER);
+        progressLbl.setFont(new Font("Arial", Font.PLAIN, 14));
+        progressLbl.setForeground(new Color(100, 40, 40));
+        progressLbl.setBounds(0, 133, 340, 24);
+        content.add(progressLbl);
+
+        // Need label
+        JLabel needLbl = new JLabel("(need " + progress.getTarget() + ")", SwingConstants.CENTER);
+        needLbl.setFont(new Font("Arial", Font.PLAIN, 12));
+        needLbl.setForeground(new Color(140, 60, 60));
+        needLbl.setBounds(0, 156, 340, 20);
+        content.add(needLbl);
+
+        // ── Try Again button
+        JButton retryBtn = makeFancyButton("🔄  Try Again", new Color(240, 100, 50));
+        retryBtn.setBounds(25, 200, 140, 52);
+        retryBtn.addActionListener(e -> {
+            dialog.dispose();
+            frame.dispose();
+            new Game().startLevel(currentLevel);
+        });
+        content.add(retryBtn);
+
+        // ── Map button
+        JButton mapBtn = makeFancyButton("🗺  Map", new Color(80, 150, 255));
+        mapBtn.setBounds(178, 200, 137, 52);
+        mapBtn.addActionListener(e -> {
+            dialog.dispose();
+            frame.dispose();
+            JFrame mapFrame = new JFrame("Level Map");
+            mapFrame.setSize(500, 800);
+            mapFrame.add(new LevelMap());
+            mapFrame.setVisible(true);
+            mapFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        });
+        content.add(mapBtn);
+
+        dialog.setContentPane(content);
+        try { dialog.setShape(new RoundRectangle2D.Float(0, 0, 340, 310, 32, 32)); }
+        catch (Exception ignored) {}
+        dialog.setVisible(true);
+    }
+
+    /** Shared pill-button factory used by win & lose dialogs. */
+    private JButton makeFancyButton(String text, Color baseColor) {
+        JButton btn = new JButton(text) {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                Color top    = getModel().isRollover() ? baseColor.brighter() : baseColor;
+                Color bottom = getModel().isPressed()  ? baseColor.darker().darker() : baseColor.darker();
+                GradientPaint gp = new GradientPaint(0, 0, top, 0, getHeight(), bottom);
+                g2.setPaint(gp);
+                g2.fill(new RoundRectangle2D.Float(0, 0, getWidth(), getHeight(), 18, 18));
+                // Highlight sheen
+                g2.setColor(new Color(255, 255, 255, 60));
+                g2.fill(new RoundRectangle2D.Float(4, 2, getWidth() - 8, getHeight() / 2 - 2, 14, 14));
+                // Text
+                g2.setColor(Color.WHITE);
+                g2.setFont(new Font("Arial", Font.BOLD, 14));
+                FontMetrics fm = g2.getFontMetrics();
+                int tx = (getWidth()  - fm.stringWidth(getText())) / 2;
+                int ty = (getHeight() + fm.getAscent() - fm.getDescent()) / 2;
+                g2.drawString(getText(), tx, ty);
+                g2.dispose();
+            }
+        };
+        btn.setOpaque(false);
+        btn.setContentAreaFilled(false);
+        btn.setBorderPainted(false);
+        btn.setFocusPainted(false);
+        btn.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        return btn;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -580,6 +740,11 @@ public class Game {
                 if (c instanceof StripedCandy)
                     drawStripeOverlay(g, (StripedCandy) c, drawX, drawY);
             }
+        }
+
+        // Hint highlight (drawn above candies, below selector)
+        if (hintSystem.isActive() && phase == Phase.IDLE) {
+            hintSystem.draw(g);
         }
 
         if (selected != null) {
@@ -683,12 +848,12 @@ public class Game {
             int col  = (int) sw[0];
             int row  = (int) sw[1];
             boolean horizClear = sw[2] == 1f;
-            float progress     = sw[3];
-            float eased = 1f - (1f - progress) * (1f - progress);
+            float prog     = sw[3];
+            float eased = 1f - (1f - prog) * (1f - prog);
             float alpha;
-            if      (progress < 0.15f) alpha = progress / 0.15f;
-            else if (progress < 0.75f) alpha = 1f;
-            else                       alpha = 1f - (progress - 0.75f) / 0.25f;
+            if      (prog < 0.15f) alpha = prog / 0.15f;
+            else if (prog < 0.75f) alpha = 1f;
+            else                   alpha = 1f - (prog - 0.75f) / 0.25f;
             int a = Math.max(0, Math.min(255, (int) (alpha * 230)));
             if (horizClear) {
                 int rowY    = row * SQUARE_SIZE;
@@ -739,5 +904,39 @@ public class Game {
         int ey = leadDown ? y2 - 6 : y1;
         g2.setColor(new Color(255, 255, 255, Math.min(255, a + 40)));
         g2.fillRect(colX, ey, thick, 6);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  HELPERS
+    // ─────────────────────────────────────────────────────────────────────
+    private void addScore(int amount) {
+        score += amount;
+        progress.notifyScoreUpdated(score);
+        frame.setTitle("Score: " + score);
+    }
+
+    private void notifyClearedAt(Point p) {
+        Candy c = board.get(p.x, p.y);
+        if (c != null) progress.notifyCandyCleared(c.getType());
+    }
+
+    private ArrayList<float[]> snapshotStripedEffects(ArrayList<Point> matches) {
+        ArrayList<float[]> result = new ArrayList<>();
+        for (Point p : matches) {
+            Candy c = board.get(p.x, p.y);
+            if (!(c instanceof StripedCandy)) continue;
+            StripedCandy sc = (StripedCandy) c;
+            result.add(new float[]{ p.x, p.y, sc.isHorizontal() ? 1f : 0f, 0f });
+        }
+        return result;
+    }
+
+    private boolean isNeighbor(Point a, Point b) {
+        return (Math.abs(a.x - b.x) == 1 && a.y == b.y) ||
+               (Math.abs(a.y - b.y) == 1 && a.x == b.x);
+    }
+
+    private void updateUI() {
+        topPanel.update(score, movesLeft, progress);
     }
 }
