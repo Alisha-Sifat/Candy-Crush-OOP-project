@@ -2,174 +2,155 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.geom.RoundRectangle2D;
 
-/**
- * TopPanel — redesigned with a rich candy-pink gradient,
- * pill-style stat badges, and a live goal progress bar.
- */
 public class TopPanel extends JPanel {
 
-    private int   currentScore  = 0;
-    private int   currentMoves  = 20;
-    private String goalText     = "Goal";
-    private int   goalProgress  = 0;   // 0–100 percent
-    private String hintText     = "";  // shown when a hint fires
+    private int currentScore = 0;
+    private int currentMoves = 20;
+    private String goalText = "Goal";
+    private int goalProgress = 0;
 
-    // ── Badge colours
-    private static final Color BADGE_MOVES  = new Color(255, 90, 130);   // hot pink
-    private static final Color BADGE_SCORE  = new Color(80,  180, 255);  // sky blue
-    private static final Color BADGE_GOAL   = new Color(120, 220, 80);   // lime green
-    private static final Color BAR_FILL     = new Color(80,  220, 80);
-    private static final Color BAR_BG       = new Color(255, 255, 255, 80);
-    private static final Color TEXT_WHITE   = Color.WHITE;
-    private static final Color TEXT_SHADOW  = new Color(0, 0, 0, 80);
+    // Colors
+    private final Color movesColor = new Color(255, 90, 130);
+    private final Color scoreColor = new Color(80, 180, 255);
+    private final Color goalColor  = new Color(120, 220, 80);
 
     public TopPanel() {
         setPreferredSize(new Dimension(600, 100));
-        setOpaque(false);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  PUBLIC UPDATE API
-    // ─────────────────────────────────────────────────────────────────────
-
-    /** Primary update — called by Game.java after every move. */
+    // Main update method
     public void update(int score, int moves, LevelProgress progress) {
-        this.currentScore = score;
-        this.currentMoves = moves;
-        this.goalText     = progress.getProgressText();
-        // Compute percent complete (cap at 100)
-        int pct = (progress.getTarget() > 0)
-                ? (int)(100L * progress.getProgress() / progress.getTarget())
-                : 0;
-        this.goalProgress = Math.min(100, pct);
+
+        currentScore = score;
+        currentMoves = moves;
+
+        goalText = progress.getProgressText();
+
+        if (progress.getTarget() > 0) {
+            goalProgress =
+                    (int)(100.0 * progress.getProgress()
+                    / progress.getTarget());
+
+            goalProgress = Math.min(goalProgress, 100);
+        }
+
         repaint();
     }
 
-    /** Legacy overload — keeps old callers compiling. */
+    // Old compatibility method
     public void update(int score, int moves, int targetScore) {
-        this.currentScore = score;
-        this.currentMoves = moves;
-        this.goalText     = "Target: " + targetScore;
-        this.goalProgress = (targetScore > 0)
-                ? Math.min(100, (int)(100L * score / targetScore)) : 0;
+
+        currentScore = score;
+        currentMoves = moves;
+
+        goalText = "Target: " + targetScore;
+
+        if (targetScore > 0) {
+            goalProgress =
+                    (int)(100.0 * score / targetScore);
+
+            goalProgress = Math.min(goalProgress, 100);
+        }
+
         repaint();
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  PAINT
-    // ─────────────────────────────────────────────────────────────────────
     @Override
     protected void paintComponent(Graphics g) {
-        Graphics2D g2 = (Graphics2D) g.create();
-        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,    RenderingHints.VALUE_ANTIALIAS_ON);
-        g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
-        int W = getWidth(), H = getHeight();
+        super.paintComponent(g);
 
-        // ── Background gradient ───────────────────────────────────────────
+        Graphics2D g2 = (Graphics2D) g;
+
+        g2.setRenderingHint(
+                RenderingHints.KEY_ANTIALIASING,
+                RenderingHints.VALUE_ANTIALIAS_ON);
+
+        int W = getWidth();
+
+        // Background
         GradientPaint bg = new GradientPaint(
-                0, 0,  new Color(255, 105, 175),   // candy pink
-                W, H,  new Color(200, 60,  140));  // deeper rose
+                0, 0, new Color(255, 120, 180),
+                0, getHeight(), new Color(200, 70, 140));
+
         g2.setPaint(bg);
-        g2.fillRect(0, 0, W, H);
+        g2.fillRect(0, 0, getWidth(), getHeight());
 
-        // Subtle diagonal sheen
-        g2.setColor(new Color(255, 255, 255, 25));
-        for (int x = 0; x < W + H; x += 18) {
-            g2.drawLine(x, 0, x - H, H);
-        }
+        // Badge sizes
+        int gap = 10;
+        int badgeW = (W - 40) / 3;
 
-        // ── Bottom separator line ─────────────────────────────────────────
-        g2.setColor(new Color(180, 40, 110, 160));
-        g2.fillRect(0, H - 3, W, 3);
+        // Draw badges
+        drawBadge(g2, gap, 10,
+                badgeW, 35,
+                movesColor,
+                "MOVES",
+                String.valueOf(currentMoves));
 
-        // ── Three badges ─────────────────────────────────────────────────
-        //   Moves | Goal progress | Score
+        drawBadge(g2, gap * 2 + badgeW, 10,
+                badgeW, 35,
+                goalColor,
+                "GOAL",
+                goalText);
 
-        int badgeY  = 10;
-        int badgeH  = 36;
-        int gap     = 10;
-        int badgeW  = (W - gap * 4) / 3;
+        drawBadge(g2, gap * 3 + badgeW * 2, 10,
+                badgeW, 35,
+                scoreColor,
+                "SCORE",
+                String.valueOf(currentScore));
 
-        // Moves badge
-        drawBadge(g2, gap,                     badgeY, badgeW, badgeH,
-                  BADGE_MOVES, "🕹 MOVES", String.valueOf(currentMoves));
+        // Progress bar background
+        int barX = 10;
+        int barY = 60;
+        int barW = W - 20;
+        int barH = 15;
 
-        // Goal badge
-        drawBadge(g2, gap * 2 + badgeW,       badgeY, badgeW, badgeH,
-                  BADGE_GOAL,  "🎯 GOAL",  goalText);
+        g2.setColor(Color.WHITE);
+        g2.fillRoundRect(barX, barY, barW, barH, 20, 20);
 
-        // Score badge
-        drawBadge(g2, gap * 3 + badgeW * 2,   badgeY, badgeW, badgeH,
-                  BADGE_SCORE, "⭐ SCORE", String.valueOf(currentScore));
+        // Progress fill
+        int fill = (int)(barW * goalProgress / 100.0);
 
-        // ── Progress bar (full width, bottom area) ────────────────────────
-        int barX = gap, barY = badgeY + badgeH + 8;
-        int barW = W - gap * 2, barH = 12;
-
-        // Background track
-        g2.setColor(BAR_BG);
-        g2.fill(new RoundRectangle2D.Float(barX, barY, barW, barH, barH, barH));
-
-        // Fill
-        int fillW = (int)(barW * goalProgress / 100.0);
-        if (fillW > 0) {
-            GradientPaint barFill = new GradientPaint(
-                    barX, barY, new Color(120, 255, 100),
-                    barX + fillW, barY, new Color(50, 200, 50));
-            g2.setPaint(barFill);
-            g2.fill(new RoundRectangle2D.Float(barX, barY, fillW, barH, barH, barH));
-
-            // Sheen on bar
-            g2.setColor(new Color(255, 255, 255, 60));
-            g2.fill(new RoundRectangle2D.Float(barX, barY, fillW, barH / 2, barH, barH));
-        }
+        g2.setColor(new Color(50, 200, 50));
+        g2.fillRoundRect(barX, barY, fill, barH, 20, 20);
 
         // Border
-        g2.setColor(new Color(255, 255, 255, 100));
-        g2.setStroke(new BasicStroke(1f));
-        g2.draw(new RoundRectangle2D.Float(barX, barY, barW, barH, barH, barH));
-
-        g2.dispose();
+        g2.setColor(Color.DARK_GRAY);
+        g2.drawRoundRect(barX, barY, barW, barH, 20, 20);
     }
 
-    /** Draws a pill-shaped badge with a small label above and a value below. */
-    private void drawBadge(Graphics2D g2, int x, int y, int w, int h,
-                           Color color, String label, String value) {
-
-        // Shadow
-        g2.setColor(new Color(0, 0, 0, 50));
-        g2.fill(new RoundRectangle2D.Float(x + 2, y + 2, w, h, h, h));
+    // Helper method for badges
+    private void drawBadge(Graphics2D g2,
+                           int x, int y,
+                           int w, int h,
+                           Color color,
+                           String label,
+                           String value) {
 
         // Badge body
-        GradientPaint gp = new GradientPaint(x, y, color.brighter(), x, y + h, color.darker());
-        g2.setPaint(gp);
-        g2.fill(new RoundRectangle2D.Float(x, y, w, h, h, h));
+        g2.setColor(color);
 
-        // Top sheen
-        g2.setColor(new Color(255, 255, 255, 70));
-        g2.fill(new RoundRectangle2D.Float(x + 3, y + 2, w - 6, h / 2 - 2, h - 4, h - 4));
+        g2.fill(new RoundRectangle2D.Float(
+                x, y, w, h, 20, 20));
 
-        // Label (small, top half)
+        // Label
+        g2.setColor(Color.WHITE);
+
         g2.setFont(new Font("Arial", Font.BOLD, 10));
-        g2.setColor(TEXT_SHADOW);
-        FontMetrics fmL = g2.getFontMetrics();
-        int lx = x + (w - fmL.stringWidth(label)) / 2;
-        g2.drawString(label, lx + 1, y + 14 + 1);
-        g2.setColor(new Color(255, 255, 255, 220));
-        g2.drawString(label, lx, y + 14);
 
-        // Value (bold, bottom half) — truncate if too long
-        String display = value;
-        g2.setFont(new Font("Arial", Font.BOLD, 13));
-        FontMetrics fmV = g2.getFontMetrics();
-        while (fmV.stringWidth(display) > w - 8 && display.length() > 4) {
-            display = display.substring(0, display.length() - 2) + "…";
-        }
-        int vx = x + (w - fmV.stringWidth(display)) / 2;
-        g2.setColor(TEXT_SHADOW);
-        g2.drawString(display, vx + 1, y + h - 7 + 1);
-        g2.setColor(TEXT_WHITE);
-        g2.drawString(display, vx, y + h - 7);
+        FontMetrics fm1 = g2.getFontMetrics();
+
+        int lx = x + (w - fm1.stringWidth(label)) / 2;
+
+        g2.drawString(label, lx, y + 12);
+
+        // Value
+        g2.setFont(new Font("Arial", Font.BOLD, 14));
+
+        FontMetrics fm2 = g2.getFontMetrics();
+
+        int vx = x + (w - fm2.stringWidth(value)) / 2;
+
+        g2.drawString(value, vx, y + 28);
     }
 }
